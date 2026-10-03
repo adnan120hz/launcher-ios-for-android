@@ -173,17 +173,27 @@ fun AppLibraryScreen(
                             )
                         }
                     }
-                    items(groupApps) { app ->
+                    items(groupApps, key = { it.packageName }) { app ->
                         var rect by remember(app.packageName) {
                             mutableStateOf<Rect?>(null)
                         }
+                        val isSelfApp = app.packageName == context.packageName
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
                                 .combinedClickable(
                                     onClick = {
-                                        launchApp(context, app.packageName, rootView, rect)
+                                        if (isSelfApp) {
+                                            // "iOS Launcher" row = door
+                                            // into launcher Settings; it
+                                            // never launches the activity
+                                            // and is never hidden by the
+                                            // OEM-settings hide rule.
+                                            onOpenSettings()
+                                        } else {
+                                            launchApp(context, app.packageName, rootView, rect)
+                                        }
                                     },
                                     onLongClick = { onIconLongPress(app) }
                                 )

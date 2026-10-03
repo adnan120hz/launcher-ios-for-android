@@ -35,7 +35,8 @@ enum class ThemeMode(val label: String) {
  *  framed with the iOS shape mask + pack styling. */
 enum class IconKind {
     PHONE, MESSAGES, BROWSER, MAIL, CAMERA, GALLERY, MAPS, CLOCK,
-    WEATHER, SETTINGS, MUSIC, NOTES, CALCULATOR, CALENDAR, FILES
+    WEATHER, SETTINGS, MUSIC, NOTES, CALCULATOR, CALENDAR, FILES,
+    LAUNCHER
 }
 
 /** Everything the icon renderer needs, bundled to keep call sites tidy. */
@@ -184,6 +185,11 @@ object IconMap {
         // camera26 always wins the CAMERA slot when installed.
         if (packages.contains(CAMERA26_PACKAGE)) {
             result[CAMERA26_PACKAGE] = IconKind.CAMERA
+        }
+        // Our own launcher entry always renders with the pack glyph so
+        // its look follows the chosen iOS 18 / iOS 26 icon style.
+        if (packages.contains(context.packageName)) {
+            result[context.packageName] = IconKind.LAUNCHER
         }
         // Hardcoded well-known packages override intent resolution.
         WELL_KNOWN.forEach { (pkg, kind) -> result[pkg] = kind }

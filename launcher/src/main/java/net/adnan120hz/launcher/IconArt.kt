@@ -115,8 +115,12 @@ private fun palette(kind: IconKind, style: IconStyle, dark: Boolean):
         if (dark) Color(0xFF26262A) to Color(0xFF121214)
         else Color(0xFFFFFFFF) to Color(0xFFF2F2F5)
     IconKind.FILES ->
-        if (dark) Color(0xFF1C3D66) to Color(0xFF0B1E38)
-        else Color(0xFF5EB2FF) to Color(0xFF1E7BE0)
+        // iOS Files: white plate, blue folder (folder drawn in glyph).
+        if (dark) Color(0xFF26262A) to Color(0xFF121214)
+        else Color(0xFFFFFFFF) to Color(0xFFF0F0F3)
+    IconKind.LAUNCHER ->
+        if (dark) Color(0xFF1D4E9E) to Color(0xFF0A2A5E)
+        else Color(0xFF57B6FF) to Color(0xFF0E63E6)
 }
 
 private fun DrawScope.drawGlyph(
@@ -128,31 +132,38 @@ private fun DrawScope.drawGlyph(
     val white = Color.White
     when (kind) {
         IconKind.PHONE -> {
-            // Handset as a thick-stroked arc with round caps.
-            val path = Path().apply {
-                moveTo(s * 0.22f, s * 0.26f)
-                cubicTo(
-                    s * 0.30f, s * 0.62f,
-                    s * 0.70f, s * 0.62f,
-                    s * 0.78f, s * 0.26f
-                )
+            // Classic handset silhouette: two chunky ends joined by a
+            // shallow arc — thick filled path reads as a handset at
+            // icon size, unlike a bare stroked arc.
+            val handset = Path().apply {
+                moveTo(s * 0.185f, s * 0.205f)
+                cubicTo(s * 0.155f, s * 0.205f, s * 0.135f, s * 0.235f, s * 0.145f, s * 0.28f)
+                cubicTo(s * 0.175f, s * 0.475f, s * 0.505f, s * 0.825f, s * 0.72f, s * 0.855f)
+                cubicTo(s * 0.765f, s * 0.865f, s * 0.795f, s * 0.845f, s * 0.795f, s * 0.815f)
+                lineTo(s * 0.795f, s * 0.70f)
+                cubicTo(s * 0.795f, s * 0.665f, s * 0.775f, s * 0.645f, s * 0.745f, s * 0.635f)
+                lineTo(s * 0.645f, s * 0.565f)
+                cubicTo(s * 0.625f, s * 0.55f, s * 0.60f, s * 0.555f, s * 0.575f, s * 0.575f)
+                cubicTo(s * 0.52f, s * 0.50f, s * 0.50f, s * 0.48f, s * 0.425f, s * 0.425f)
+                cubicTo(s * 0.445f, s * 0.40f, s * 0.45f, s * 0.375f, s * 0.435f, s * 0.355f)
+                lineTo(s * 0.365f, s * 0.255f)
+                cubicTo(s * 0.355f, s * 0.23f, s * 0.335f, s * 0.215f, s * 0.30f, s * 0.215f)
+                lineTo(s * 0.185f, s * 0.205f)
+                close()
             }
-            drawPath(
-                path, white,
-                style = Stroke(width = s * 0.17f, cap = StrokeCap.Round)
-            )
+            drawPath(handset, white)
         }
         IconKind.MESSAGES -> {
             drawRoundRect(
                 white,
-                topLeft = Offset(s * 0.15f, s * 0.20f),
-                size = Size(s * 0.70f, s * 0.47f),
-                cornerRadius = CornerRadius(s * 0.16f)
+                topLeft = Offset(s * 0.14f, s * 0.19f),
+                size = Size(s * 0.72f, s * 0.49f),
+                cornerRadius = CornerRadius(s * 0.17f)
             )
             val tail = Path().apply {
-                moveTo(s * 0.28f, s * 0.62f)
-                lineTo(s * 0.27f, s * 0.84f)
-                lineTo(s * 0.47f, s * 0.65f)
+                moveTo(s * 0.30f, s * 0.60f)
+                cubicTo(s * 0.30f, s * 0.74f, s * 0.24f, s * 0.82f, s * 0.20f, s * 0.86f)
+                cubicTo(s * 0.34f, s * 0.82f, s * 0.44f, s * 0.74f, s * 0.52f, s * 0.64f)
                 close()
             }
             drawPath(tail, white)
@@ -184,19 +195,21 @@ private fun DrawScope.drawGlyph(
                 size = Size(s * 0.74f, s * 0.47f),
                 cornerRadius = CornerRadius(s * 0.05f)
             )
-            val blue = if (dark) Color(0xFF1450A0) else Color(0xFF1D6FE0)
+            // Filled V flap, iOS style (not just an outline stroke).
+            val blue = if (dark) Color(0xFF3E8FE0) else Color(0xFF1D6FE0)
             val flap = Path().apply {
-                moveTo(s * 0.16f, s * 0.30f)
-                lineTo(s * 0.50f, s * 0.54f)
-                lineTo(s * 0.84f, s * 0.30f)
+                moveTo(s * 0.155f, s * 0.295f)
+                lineTo(s * 0.50f, s * 0.555f)
+                lineTo(s * 0.845f, s * 0.295f)
+                lineTo(s * 0.845f, s * 0.355f)
+                lineTo(s * 0.50f, s * 0.575f)
+                lineTo(s * 0.155f, s * 0.355f)
+                close()
             }
-            drawPath(
-                flap, blue,
-                style = Stroke(width = s * 0.038f, cap = StrokeCap.Round)
-            )
+            drawPath(flap, blue)
         }
         IconKind.CAMERA -> {
-            // Bump + body + lens assembly.
+            // Bump + body + lens assembly + tiny flash dot (iOS layout).
             drawRoundRect(
                 if (dark) Color(0xFF58585E) else Color(0xFF8E8E96),
                 topLeft = Offset(s * 0.37f, s * 0.24f),
@@ -223,77 +236,115 @@ private fun DrawScope.drawGlyph(
                 white, radius = s * 0.032f,
                 center = center + Offset(-s * 0.045f, -s * 0.045f)
             )
+            // Flash dot, upper right of the body.
+            drawCircle(
+                if (dark) Color(0xFFF2F2F5) else Color(0xFFE3E3E8),
+                radius = s * 0.022f,
+                center = Offset(s * 0.80f, s * 0.42f)
+            )
         }
         IconKind.GALLERY -> {
-            // Photos-style colour pinwheel: 8 translucent petals.
+            // Photos-style colour pinwheel: 8 slender tapered petals in
+            // Apple's colour order (orange, yellow, lime, green, mint,
+            // blue, purple, pink), slightly translucent where they stack.
             val petalColors = listOf(
-                Color(0xFFF5A623), Color(0xFFF8E71C), Color(0xFF7ED321),
-                Color(0xFF50E3C2), Color(0xFF4A90E2), Color(0xFF9013FE),
-                Color(0xFFFF5E9C), Color(0xFFFC3D39)
+                Color(0xFFF5A623), Color(0xFFF8E71C), Color(0xFFA8E063),
+                Color(0xFF4CD964), Color(0xFF5CE8C5), Color(0xFF4A90E2),
+                Color(0xFF9013FE), Color(0xFFFC5E9C)
             )
+            val petal = Path().apply {
+                moveTo(center.x, center.y - s * 0.40f)
+                cubicTo(
+                    center.x + s * 0.105f, center.y - s * 0.40f,
+                    center.x + s * 0.105f, center.y - s * 0.12f,
+                    center.x, center.y - s * 0.10f
+                )
+                cubicTo(
+                    center.x - s * 0.105f, center.y - s * 0.12f,
+                    center.x - s * 0.105f, center.y - s * 0.40f,
+                    center.x, center.y - s * 0.40f
+                )
+                close()
+            }
             petalColors.forEachIndexed { i, color ->
                 rotate(degrees = i * 45f, pivot = center) {
-                    drawOval(
-                        color.copy(alpha = 0.72f),
-                        topLeft = Offset(
-                            center.x - s * 0.085f,
-                            center.y - s * 0.36f
-                        ),
-                        size = Size(s * 0.17f, s * 0.34f)
-                    )
+                    drawPath(petal, color.copy(alpha = 0.78f))
                 }
             }
         }
         IconKind.MAPS -> {
-            // Stylised map: blue river band, two roads, red pin.
-            val river = Path().apply {
-                moveTo(0f, s * 0.30f)
-                lineTo(s * 0.55f, 0f)
-                lineTo(s * 0.85f, 0f)
-                lineTo(s * 0.30f, s * 0.30f)
+            // Block-colour map (iOS Maps language): green land, a broad
+            // yellow road sweeping diagonally, a blue river corner, and
+            // the red location pin on top.
+            drawRect(Color(0xFF8FD35F))
+            val riverBlock = Path().apply {
+                moveTo(0f, 0f)
+                lineTo(s * 0.52f, 0f)
+                lineTo(0f, s * 0.55f)
                 close()
             }
-            drawPath(river, Color(0xFF7FC8F8))
+            drawPath(riverBlock, Color(0xFF6EC6F0))
+            val road = Path().apply {
+                moveTo(-s * 0.05f, s * 1.05f)
+                lineTo(s * 0.62f, s * 0.38f)
+                lineTo(s * 0.78f, s * 0.50f)
+                lineTo(s * 0.12f, s * 1.05f)
+                close()
+            }
+            drawPath(road, Color(0xFFFFD60A))
             drawLine(
-                Color(0xFFFFCC00), Offset(0f, s * 1.02f),
-                Offset(s, s * 0.48f), strokeWidth = s * 0.14f
+                white, Offset(s * 0.015f, s * 1.02f),
+                Offset(s * 0.685f, s * 0.415f),
+                strokeWidth = s * 0.018f
             )
-            drawLine(
-                white, Offset(s * 0.12f, 0f),
-                Offset(s * 0.88f, s), strokeWidth = s * 0.07f
-            )
-            drawLine(
-                Color(0xFFFFCC00), Offset(s * 0.12f, 0f),
-                Offset(s * 0.88f, s), strokeWidth = s * 0.028f
-            )
-            val pinX = s * 0.68f
-            val pinY = s * 0.34f
+            val pinX = s * 0.66f
+            val pinY = s * 0.30f
             val pinTail = Path().apply {
-                moveTo(pinX - s * 0.07f, pinY + s * 0.05f)
-                lineTo(pinX, pinY + s * 0.22f)
-                lineTo(pinX + s * 0.07f, pinY + s * 0.05f)
+                moveTo(pinX - s * 0.075f, pinY + s * 0.055f)
+                lineTo(pinX, pinY + s * 0.235f)
+                lineTo(pinX + s * 0.075f, pinY + s * 0.055f)
                 close()
             }
             drawPath(pinTail, Color(0xFFFF3B30))
             drawCircle(
-                Color(0xFFFF3B30), radius = s * 0.115f,
+                Color(0xFFFF3B30), radius = s * 0.12f,
                 center = Offset(pinX, pinY)
             )
             drawCircle(
-                white, radius = s * 0.045f,
+                white, radius = s * 0.047f,
                 center = Offset(pinX, pinY)
             )
         }
         IconKind.CLOCK -> {
             drawCircle(white, radius = s * 0.40f, center = center)
             val ink = Color(0xFF111114)
+            // Real device time, like the iOS clock icon: hour + minute
+            // hands in black, thin orange second hand. Static per render
+            // (icons redraw on recomposition; good enough at icon size).
+            val now = java.time.LocalTime.now()
+            val minuteAngle = (now.minute + now.second / 60f) / 60f *
+                360f - 90f
+            val hourAngle = ((now.hour % 12) + now.minute / 60f) / 12f *
+                360f - 90f
+            fun handEnd(angleDeg: Float, len: Float): Offset {
+                val rad = Math.toRadians(angleDeg.toDouble())
+                return center + Offset(
+                    (kotlin.math.cos(rad) * len).toFloat(),
+                    (kotlin.math.sin(rad) * len).toFloat()
+                )
+            }
             drawLine(
-                ink, center, center + Offset(0f, -s * 0.235f),
-                strokeWidth = s * 0.05f, cap = StrokeCap.Round
+                ink, center, handEnd(hourAngle, s * 0.20f),
+                strokeWidth = s * 0.055f, cap = StrokeCap.Round
             )
             drawLine(
-                ink, center, center + Offset(s * 0.16f, s * 0.06f),
-                strokeWidth = s * 0.05f, cap = StrokeCap.Round
+                ink, center, handEnd(minuteAngle, s * 0.30f),
+                strokeWidth = s * 0.045f, cap = StrokeCap.Round
+            )
+            val secAngle = now.second / 60f * 360f - 90f
+            drawLine(
+                Color(0xFFFF9500), center, handEnd(secAngle, s * 0.32f),
+                strokeWidth = s * 0.016f, cap = StrokeCap.Round
             )
             drawCircle(ink, radius = s * 0.035f, center = center)
         }
@@ -322,23 +373,23 @@ private fun DrawScope.drawGlyph(
         }
         IconKind.SETTINGS -> {
             val gear = if (dark) Color(0xFFD8D8DE) else Color(0xFFF2F2F5)
-            for (i in 0 until 8) {
-                rotate(degrees = i * 45f, pivot = center) {
+            for (i in 0 until 9) {
+                rotate(degrees = i * 40f, pivot = center) {
                     drawRoundRect(
                         gear,
                         topLeft = Offset(
-                            center.x - s * 0.055f,
-                            center.y - s * 0.42f
+                            center.x - s * 0.047f,
+                            center.y - s * 0.43f
                         ),
-                        size = Size(s * 0.11f, s * 0.17f),
-                        cornerRadius = CornerRadius(s * 0.03f)
+                        size = Size(s * 0.094f, s * 0.18f),
+                        cornerRadius = CornerRadius(s * 0.025f)
                     )
                 }
             }
-            drawCircle(gear, radius = s * 0.30f, center = center)
+            drawCircle(gear, radius = s * 0.295f, center = center)
             drawCircle(
                 if (dark) Color(0xFF2C2C30) else Color(0xFF9A9AA1),
-                radius = s * 0.135f, center = center
+                radius = s * 0.125f, center = center
             )
         }
         IconKind.MUSIC -> {
@@ -411,6 +462,11 @@ private fun DrawScope.drawGlyph(
                 val paint = Paint().apply {
                     isAntiAlias = true
                     textAlign = Paint.Align.CENTER
+                    // iOS calendar uses a light-weight date numeral.
+                    typeface = android.graphics.Typeface.create(
+                        "sans-serif-light",
+                        android.graphics.Typeface.NORMAL
+                    )
                 }
                 paint.color = android.graphics.Color.rgb(
                     (red.red * 255).toInt(),
@@ -418,6 +474,10 @@ private fun DrawScope.drawGlyph(
                     (red.blue * 255).toInt()
                 )
                 paint.textSize = s * 0.20f
+                paint.typeface = android.graphics.Typeface.create(
+                    "sans-serif-medium",
+                    android.graphics.Typeface.NORMAL
+                )
                 drawText(weekday, s / 2f, s * 0.30f, paint)
                 paint.color = android.graphics.Color.rgb(
                     (ink.red * 255).toInt(),
@@ -429,6 +489,9 @@ private fun DrawScope.drawGlyph(
             }
         }
         IconKind.FILES -> {
+            // iOS Files: blue folder on the white plate (palette paints
+            // the plate). Back panel + tab in deep blue, front panel in
+            // the lighter sky blue, slightly trapezoidal like iOS.
             val folderDark = if (dark) Color(0xFF64A8F0) else Color(0xFF1E7BE0)
             val folderLight = if (dark) Color(0xFF9CC8F7) else Color(0xFF7CC0FF)
             // Back panel with tab.
@@ -458,6 +521,48 @@ private fun DrawScope.drawGlyph(
                 close()
             }
             drawPath(front, folderLight)
+        }
+        IconKind.LAUNCHER -> {
+            // Our own mark: a 2x2 mini home-screen grid (phone, browser
+            // compass, messages bubble, music note simplified to dots +
+            // blocks) so the glyph says "launcher" at a glance and its
+            // colours come from the active pack palette behind it.
+            val tiles = listOf(
+                Offset(s * 0.155f, s * 0.155f) to Color(0xFF34C759),
+                Offset(s * 0.53f, s * 0.155f) to Color(0xFF0A84FF),
+                Offset(s * 0.155f, s * 0.53f) to Color(0xFF30D158),
+                Offset(s * 0.53f, s * 0.53f) to Color(0xFFE8324A)
+            )
+            tiles.forEach { (tl, color) ->
+                drawRoundRect(
+                    color,
+                    topLeft = tl,
+                    size = Size(s * 0.315f, s * 0.315f),
+                    cornerRadius = CornerRadius(s * 0.09f)
+                )
+            }
+            // Mini glyphs on the two most recognisable tiles.
+            drawCircle(
+                white, radius = s * 0.075f,
+                center = Offset(s * 0.6875f, s * 0.3125f)
+            )
+            drawCircle(
+                Color(0xFF0A84FF), radius = s * 0.050f,
+                center = Offset(s * 0.6875f, s * 0.3125f)
+            )
+            val bubbleTail = Path().apply {
+                moveTo(s * 0.25f, s * 0.415f)
+                lineTo(s * 0.24f, s * 0.50f)
+                lineTo(s * 0.33f, s * 0.43f)
+                close()
+            }
+            drawPath(bubbleTail, white)
+            drawRoundRect(
+                white,
+                topLeft = Offset(s * 0.225f, s * 0.245f),
+                size = Size(s * 0.19f, s * 0.155f),
+                cornerRadius = CornerRadius(s * 0.06f)
+            )
         }
     }
 }

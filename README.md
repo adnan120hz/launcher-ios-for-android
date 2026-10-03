@@ -53,40 +53,79 @@ lock stays fully in charge of device security; the fingerprint/face
 prompt on this layer only dismisses the visual layer. This is stated
 again inside the app (Settings › Layar Kunci iOS).
 
+## Open/close animation honesty note (v0.7.0)
+
+**Opening** an app is fully ours to shape: the launch uses
+`ActivityOptions.makeScaleUpAnimation` anchored at the tapped icon's
+real bounds, the tapped icon spring-squashes and fades into the growing
+window (iOS 26 style), and the home surface zooms back slightly with a
+progressive, downscale-capped blur (per performance tier) behind it.
+The returning icon spring-lands at 122% → 100% when you come home.
+
+**Closing** an app is different: Android owns the exit window flight
+for third-party launchers. No third-party app can force the system to
+shrink another app's window back into a specific icon — that is a
+platform limit, not a missing permission, and developer-mode flags do
+not change it. What we do control, we use: our own home layer
+sharpens/unblurs with a spring on return and the icon the app was
+opened from plays the landing spring. We do not claim more than the
+platform allows.
+
+## Style rule (binding, v0.7.0)
+
+- **iOS 18 style = absolutely no Liquid Glass anywhere** on that
+  surface: flat, solid, classic skins.
+- **iOS 26 style = Liquid Glass always on** on that surface.
+- The global Liquid Glass switch OFF drops every surface to the solid
+  iOS 18 family — there is no "iOS 26 but glass missing" state.
+
+## Dynamic Island (v0.7.0)
+
+Real data only, no decoration states: clock, charging state with the
+real battery percentage, a running countdown, and the currently
+playing track (title + artist, tap the pill to play/pause) — all from
+live system/media sessions; a state with no real data behind it is
+never shown. The island is user-tunable in Settings (size, width,
+horizontal/vertical offset) with a live preview, sliders apply while
+you drag, values persist, and a reset returns it to the iOS-style
+center-top default.
+
 ## Status
 
-**Phase 4: iOS lock screen (launcher v0.5.0).** On top of phases 0–3
-(paged home, Liquid Glass dock, App Library + search, Control Center in
-iOS 18/iOS 26 styles, Dynamic Island overlay, hand-drawn iOS 18/26 icon
-packs with dark variant, custom icon shapes, per-app custom icons from
-the gallery, live manual dock-glass tuning):
+**v0.7.0 — the big build.** Everything from phases 0–5 (paged home,
+Liquid Glass dock, App Library + search, Dynamic Island overlay,
+hand-drawn iOS 18/26 icon packs with dark variant, custom icon shapes,
+per-app custom icons from the gallery, live manual dock-glass tuning,
+iOS lock layer with clock customization and BiometricPrompt unlock),
+plus this build:
 
-- iOS-style lock layer: big clock + date over your wallpaper, swipe-up
-  indicator, two bottom shortcuts — flashlight (real torch toggle) and
-  camera (opens this project's Camera iOS 26 app, or the system camera)
-- Appears after the screen turns off and the system lock is passed
-  (screen-state watcher service + overlay window), from the "Kunci"
-  button in Settings / Control Center, and as an in-launcher layer when
-  the overlay permission is not granted
-- Swipe up to dismiss; fingerprint/face (BiometricPrompt) is asked when
-  the device has one enrolled and the setting is on, otherwise swipe
-  only. A cancelled biometric attempt offers an explicit swipe fallback
-- Notification stack in iOS style, fed by real notifications once you
-  grant notification access (Settings › Layar Kunci iOS); until then the
-  lock shows an honest "permission needed" card instead of fake entries
-- Full customization in Settings, all live-previewed and persistent:
-  clock size slider, "extended" (bigger & wider) clock, clock color
-  (preset swatches + HSV picker), font weight, wallpaper blur behind
-  the clock, Liquid Glass intensity on lock elements. Lock elements
-  follow the global style — Liquid Glass off or iOS 18 style selected
-  makes them solid iOS-18 style
+- **Open/close motion rebuilt**: spring-driven icon launch (squash +
+  fade into the system window zoom anchored at the icon), progressive
+  downscaled home blur + slight zoom-out behind the window, and a
+  spring landing on return. Honest platform limit for the exit flight
+  is documented above.
+- **Control Center redesigned from reference screenshots**: iOS 26
+  glass squircle connectivity module, squircle music card, two big
+  circles (orientation lock, Do Not Disturb) and two tall draggable
+  brightness/volume capsules; iOS 18 renders the same real layout in
+  flat classic skins. Every control is real: torch toggle, brightness
+  (with the system grant), media volume, orientation-lock write, DND
+  interruption filter, system panels for Wi-Fi/Bluetooth/airplane
+  (Android forbids third-party toggles), live media controls, and
+  shortcuts that only appear when the target app exists.
+- **Icon pack redrawn** (15 kinds, both styles + dark): thicker, more
+  faithful glyphs, real device clock, plus the launcher's own icon.
+  The launcher itself now appears in the grid and App Library as
+  "iOS Launcher" and opens launcher Settings; the OEM-settings hide
+  rule never applies to it.
+- **Liquid Glass in the app's own UI** (Settings cards, icon context
+  menu) when glass is on; flat solid iOS 18 when off.
+- **Dynamic Island is tunable & data-real** (see above).
+- **Anti-lag & adaptive**: icon bitmap cache, raster downscale cap,
+  cached media-session lookups, and a grid that adapts icon size and
+  spacing to the device's width/height.
 
-Still spec for later phases: motion-blur open/close animations
-(iOS 18 / iOS 26 fluid), real CameraX camera polish. Features land
-phase by phase.
-
-Phase 0: project foundation. The launcher skeleton (onboarding, installed-app
-grid, 4-slot glass dock) and the camera UI skeleton build in CI on every push.
+Builds are debug artifacts from CI; on-device verdicts pending.
 
 ## Building
 

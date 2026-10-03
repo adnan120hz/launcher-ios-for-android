@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -236,7 +237,10 @@ fun AppIconImage(
     val kind = cfg.kindByPackage[app.packageName]
     val originalBitmap = remember(app.packageName, kind, customBitmap) {
         if (customBitmap == null && kind == null) {
-            app.icon.toBitmapSafe().asImageBitmap()
+            IconBitmapCache.get(app.packageName)
+                ?: app.icon.toBitmapSafe().also {
+                    IconBitmapCache.put(app.packageName, it)
+                }
         } else {
             null
         }
@@ -324,7 +328,9 @@ fun AppIconCell(
     cfg: IconConfig,
     rootView: View,
     animStyle: AnimStyle,
-    onIconLongPress: (AppEntry) -> Unit
+    onIconLongPress: (AppEntry) -> Unit,
+    onSelfClick: () -> Unit = {},
+    iconSize: Dp = 58.dp
 ) {
     val context = LocalContext.current
     var rect by remember { mutableStateOf<Rect?>(null) }
@@ -341,12 +347,47 @@ fun AppIconCell(
         ),
         label = "iconPress"
     )
+    // 0.7.0: while the app window grows out of this icon, the icon
+    // itself dissolves into it (quick fade), exactly like the reference
+    // video where the glyph becomes the window.
+    val outgoingAlpha by animateFloatAsState(
+        targetValue = if (isOutgoing) 0f else 1f,
+        animationSpec = tween(durationMillis = 210),
+        label = "iconOutAlpha"
+    )
+    // 0.7.0 "close" flight, launcher side: on return this icon springs
+    // in from 122% with a soft bounce (landing), while the system plays
+    // its own exit window animation over us.
+    val landing = animStyle == AnimStyle.IOS26 &&
+        OutgoingLaunch.landingPackage == app.packageName
+    val landingScale = remember { Animatable(1f) }
+    LaunchedEffect(landing) {
+        if (landing) {
+            landingScale.snapTo(1.22f)
+            landingScale.animateTo(
+                1f,
+                spring(
+                    dampingRatio = 0.45f,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+        }
+    }
+    val isSelf = app.packageName == context.packageName
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .combinedClickable(
-                onClick = { launchApp(context, app.packageName, rootView, rect) },
+                onClick = {
+                    if (isSelf) {
+                        // Our own entry never launches the activity; it
+                        // is the user's door into launcher Settings.
+                        onSelfClick()
+                    } else {
+                        launchApp(context, app.packageName, rootView, rect)
+                    }
+                },
                 onLongClick = { onIconLongPress(app) }
             )
             .padding(vertical = 4.dp),
@@ -354,11 +395,13 @@ fun AppIconCell(
     ) {
         AppIconImage(
             app = app,
-            sizeDp = 58.dp,
+            sizeDp = iconSize,
             cfg = cfg,
             modifier = Modifier.graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
+                val combined = pressScale * landingScale.value
+                scaleX = combined
+                scaleY = combined
+                alpha = outgoingAlpha
             },
             onBounds = { rect = it }
         )
@@ -388,9 +431,24 @@ private fun AppPage(
     rootView: View,
     animStyle: AnimStyle,
     onLongPressHome: () -> Unit,
-    onIconLongPress: (AppEntry) -> Unit
+    onIconLongPress: (AppEntry) -> Unit,
+    onSelfClick: () -> Unit
 ) {
-    Box(modifier = Modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        // Adaptive grid geometry (0.7.0): icon size & rhythm scale with
+        // the actual device width/height so small and large phones both
+        // stay neat instead of one fixed layout stretched everywhere.
+        val widthDp = maxWidth
+        val iconSize = when {
+            widthDp < 340.dp -> 50.dp
+            widthDp > 430.dp -> 64.dp
+            else -> 58.dp
+        }
+        val rowSpacing = when {
+            maxHeight < 560.dp -> 10.dp
+            maxHeight > 760.dp -> 20.dp
+            else -> 18.dp
+        }
         // Empty-area long press opens launcher settings; icon cells
         // consume their own long presses (icon context menu).
         Box(
@@ -404,7 +462,7 @@ private fun AppPage(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(start = 16.dp, end = 16.dp, top = 48.dp, bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
+            verticalArrangement = Arrangement.spacedBy(rowSpacing)
         ) {
             pageApps.chunked(4).forEach { rowApps ->
                 Row(
@@ -413,7 +471,11 @@ private fun AppPage(
                 ) {
                     rowApps.forEach { app ->
                         Box(modifier = Modifier.weight(1f)) {
-                            AppIconCell(app, cfg, rootView, animStyle, onIconLongPress)
+                            AppIconCell(
+                                app, cfg, rootView, animStyle,
+                                onIconLongPress, onSelfClick,
+                                iconSize = iconSize
+                            )
                         }
                     }
                     repeat(4 - rowApps.size) {
@@ -657,9 +719,15 @@ fun HomeScreen(
         )
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                // Phase 5: coming back home = the "close" flight; end
-                // the outgoing-launch blur/spring state so the home
-                // surface washes back to sharp.
+                // Phase 5/6: coming back home = the "close" flight.
+                // Name the returning icon so it spring-lands on arrival
+                // (0.7.0), then end the outgoing-launch wash so the home
+                // surface sharpens back. The system exit window flight is
+                // system-owned — README states this limit honestly.
+                val outgoing = OutgoingLaunch.activePackage
+                if (outgoing != null) {
+                    OutgoingLaunch.landingPackage = outgoing
+                }
                 OutgoingLaunch.activePackage = null
                 if (LockScreenRuntime.screenOffPending) {
                     LockScreenRuntime.screenOffPending = false
@@ -699,6 +767,15 @@ fun HomeScreen(
         }
     }
 
+    // 0.7.0: the landing spring takes ~0.7s; afterwards forget which
+    // icon landed so a later recomposition doesn't replay it.
+    LaunchedEffect(OutgoingLaunch.landingPackage) {
+        if (OutgoingLaunch.landingPackage != null) {
+            kotlinx.coroutines.delay(900)
+            OutgoingLaunch.landingPackage = null
+        }
+    }
+
     // Bring the lock service back when the launcher opens with the
     // feature switched on (e.g. after the process was killed).
     LaunchedEffect(Unit) {
@@ -730,6 +807,26 @@ fun HomeScreen(
     }
     var manualCheckTick by remember { mutableIntStateOf(0) }
     val appVersion = remember { UpdateChecker.currentVersionName(context) }
+
+    // ---- Dynamic Island geometry (0.7.0, user-tunable, LIVE) --------
+    var islandScale by remember { mutableStateOf(store.islandScale) }
+    var islandWidthFactor by remember {
+        mutableStateOf(store.islandWidthFactor)
+    }
+    var islandOffsetXDp by remember { mutableStateOf(store.islandOffsetXDp) }
+    var islandOffsetYDp by remember { mutableStateOf(store.islandOffsetYDp) }
+
+    fun pushIslandRefresh() {
+        if (!IslandState.running) return
+        try {
+            context.startService(
+                Intent(context, IslandService::class.java)
+                    .setAction(IslandService.ACTION_REFRESH)
+            )
+        } catch (e: Exception) {
+            // service start refused; island picks values up next start
+        }
+    }
 
     suspend fun runUpdateCheck(manual: Boolean) {
         if (!manual && !store.updateChecksEnabled) return
@@ -784,8 +881,13 @@ fun HomeScreen(
         ThemeMode.DARK -> true
     }
     val shadowsEnabled = perfTier != PerfTier.ENTRY
+    // GLOBAL GLASS RULE (0.7.0): glass OFF forces the solid iOS 18 icon
+    // family even if the user last picked "iOS 26" — iOS 26 without
+    // glass anywhere is a bug state, never rendered.
+    val renderIconStyle =
+        if (!glassEnabled) IconStyle.IOS18 else iconStyle
     val iconCfg = IconConfig(
-        style = iconStyle,
+        style = renderIconStyle,
         dark = iconDark,
         shape = iconShape,
         shadowsEnabled = shadowsEnabled,
@@ -855,7 +957,8 @@ fun HomeScreen(
     if (showSettings) {
         SettingsScreen(
             apps = apps,
-            iconStyle = iconStyle,
+            iconStyle = renderIconStyle,
+            rawIconStyle = iconStyle,
             glassEnabled = glassEnabled,
             perfTier = perfTier,
             dockPackages = dockPackages,
@@ -940,6 +1043,29 @@ fun HomeScreen(
                 showSettings = false
                 lockNow()
             },
+            islandScale = islandScale,
+            islandWidthFactor = islandWidthFactor,
+            islandOffsetXDp = islandOffsetXDp,
+            islandOffsetYDp = islandOffsetYDp,
+            onIslandGeometryChange = { scale, width, x, y ->
+                islandScale = scale
+                islandWidthFactor = width
+                islandOffsetXDp = x
+                islandOffsetYDp = y
+                store.islandScale = scale
+                store.islandWidthFactor = width
+                store.islandOffsetXDp = x
+                store.islandOffsetYDp = y
+                pushIslandRefresh()
+            },
+            onResetIslandGeometry = {
+                store.resetIslandGeometry()
+                islandScale = store.islandScale
+                islandWidthFactor = store.islandWidthFactor
+                islandOffsetXDp = store.islandOffsetXDp
+                islandOffsetYDp = store.islandOffsetYDp
+                pushIslandRefresh()
+            },
             onOpenControlCenter = {
                 showSettings = false
                 showControlCenter = true
@@ -1002,7 +1128,14 @@ fun HomeScreen(
             Modifier
                 .matchParentSize()
                 .blur((launchProgress * launchBlurRadiusDp(perfTier)).dp)
-                .graphicsLayer { alpha = 1f - launchProgress * 0.10f }
+                .graphicsLayer {
+                    // iOS feel: the whole home surface also pulls back
+                    // slightly (zoom-out) behind the opening window.
+                    val pullBack = 1f - launchProgress * 0.055f
+                    scaleX = pullBack
+                    scaleY = pullBack
+                    alpha = 1f - launchProgress * 0.10f
+                }
         ) {
         WallpaperBackground(Modifier.fillMaxSize())
         Column(modifier = Modifier.fillMaxSize()) {
@@ -1019,7 +1152,8 @@ fun HomeScreen(
                         rootView = rootView,
                         animStyle = animStyle,
                         onLongPressHome = { showSettings = true },
-                        onIconLongPress = { menuApp = it }
+                        onIconLongPress = { menuApp = it },
+                        onSelfClick = { showSettings = true }
                     )
                 } else {
                     AppLibraryScreen(
@@ -1101,6 +1235,7 @@ fun HomeScreen(
             IconContextMenu(
                 app = app,
                 cfg = iconCfg,
+                glass = glassEnabled,
                 hasCustom = hasCustom,
                 onDismiss = { menuApp = null },
                 onChangeIcon = {
@@ -1130,6 +1265,7 @@ fun HomeScreen(
 private fun IconContextMenu(
     app: AppEntry,
     cfg: IconConfig,
+    glass: Boolean,
     hasCustom: Boolean,
     onDismiss: () -> Unit,
     onChangeIcon: () -> Unit,
@@ -1141,7 +1277,29 @@ private fun IconContextMenu(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(24.dp))
-                .background(Color(0xFFF2F2F7))
+                // 0.7.0: the app's own sheets follow the same glass rule
+                // — glass plate when Liquid Glass is on, solid iOS 18
+                // sheet when it is off. NEVER grey-on-grey mud.
+                .background(
+                    if (glass) Brush.verticalGradient(
+                        listOf(
+                            Color(0xFF2B3448).copy(alpha = 0.92f),
+                            Color(0xFF171D2B).copy(alpha = 0.94f)
+                        )
+                    ) else Brush.verticalGradient(
+                        listOf(Color(0xFFF2F2F7), Color(0xFFF2F2F7))
+                    )
+                )
+                .then(
+                    if (glass) {
+                        Modifier.border(
+                            1.dp, Color.White.copy(alpha = 0.35f),
+                            RoundedCornerShape(24.dp)
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
                 .padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -1151,16 +1309,16 @@ private fun IconContextMenu(
                 text = app.label,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = Color.Black,
+                color = if (glass) Color.White else Color.Black,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(16.dp))
-            MenuRow("🖼  Ganti ikon dari galeri", onChangeIcon)
+            MenuRow("🖼  Ganti ikon dari galeri", glass, onChangeIcon)
             if (hasCustom) {
-                MenuRow("↩  Reset ke ikon bawaan", onResetIcon)
+                MenuRow("↩  Reset ke ikon bawaan", glass, onResetIcon)
             }
-            MenuRow("⚙  Pengaturan launcher", onOpenSettings)
+            MenuRow("⚙  Pengaturan launcher", glass, onOpenSettings)
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = "Batal",
@@ -1176,15 +1334,18 @@ private fun IconContextMenu(
 }
 
 @Composable
-private fun MenuRow(label: String, onClick: () -> Unit) {
+private fun MenuRow(label: String, glass: Boolean, onClick: () -> Unit) {
     Text(
         text = label,
         fontSize = 15.sp,
-        color = Color(0xFF1C1C1E),
+        color = if (glass) Color.White else Color(0xFF1C1C1E),
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(Color.White)
+            .background(
+                if (glass) Color.White.copy(alpha = 0.18f)
+                else Color.White
+            )
             .clickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 13.dp)
     )

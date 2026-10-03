@@ -174,10 +174,18 @@ class LauncherStore(context: Context) {
             .apply()
     }
 
-    /** Lock elements follow the global style choice: Liquid Glass toggle
-     *  OFF (or the iOS 18 style picked) = solid iOS-18 lock elements. */
+    /** Lock elements follow the global style rule: the iOS 26 style is
+     *  selected for lock elements (via [effectiveCcStyle]) AND the global
+     *  Liquid Glass switch is on. GLOBAL RULE (0.7.0): iOS 26 style always
+     *  shows glass; iOS 18 or glass OFF always solid. */
     fun lockGlassStyleIs26(): Boolean =
-        effectiveCcStyle() == CcStyle.IOS26
+        glassEnabled && effectiveCcStyle() == CcStyle.IOS26
+
+    /** Dynamic Island style under the same global rule: glass only when
+     *  the iOS 26 look is effectively selected AND the global switch is
+     *  on; otherwise the island renders solid iOS 18. */
+    fun islandGlassStyleIs26(): Boolean =
+        glassEnabled && effectiveCcStyle() == CcStyle.IOS26
 
     /** App open/close animation style (Phase 5). */
     var animStyle: AnimStyle
@@ -216,6 +224,49 @@ class LauncherStore(context: Context) {
             prefs.edit().putString(KEY_AVAILABLE_VERSION, value).apply()
         }
 
+    // ---- Dynamic Island customization (Phase 6 / 0.7.0) ---------------
+    // User-tunable geometry for the overlay pill. All values apply LIVE
+    // (the service re-reads them on an ACTION_REFRESH intent) and persist
+    // here. The style (glass vs solid) still follows the global toggles:
+    // Liquid Glass OFF -> solid iOS-18 island.
+
+    /** Overall pill scale, 0.8 (small) .. 1.3 (large). */
+    var islandScale: Float
+        get() = prefs.getFloat(KEY_ISLAND_SCALE, 1.0f)
+        set(value) {
+            prefs.edit().putFloat(KEY_ISLAND_SCALE, value).apply()
+        }
+
+    /** Width multiplier on the per-state base width, 0.7 .. 1.6. */
+    var islandWidthFactor: Float
+        get() = prefs.getFloat(KEY_ISLAND_WIDTH, 1.0f)
+        set(value) {
+            prefs.edit().putFloat(KEY_ISLAND_WIDTH, value).apply()
+        }
+
+    /** Horizontal offset from top-center, in dp (-140 .. 140). */
+    var islandOffsetXDp: Float
+        get() = prefs.getFloat(KEY_ISLAND_OFFSET_X, 0f)
+        set(value) {
+            prefs.edit().putFloat(KEY_ISLAND_OFFSET_X, value).apply()
+        }
+
+    /** Vertical offset from the top edge, in dp (0 .. 96). */
+    var islandOffsetYDp: Float
+        get() = prefs.getFloat(KEY_ISLAND_OFFSET_Y, 14f)
+        set(value) {
+            prefs.edit().putFloat(KEY_ISLAND_OFFSET_Y, value).apply()
+        }
+
+    fun resetIslandGeometry() {
+        prefs.edit()
+            .putFloat(KEY_ISLAND_SCALE, 1.0f)
+            .putFloat(KEY_ISLAND_WIDTH, 1.0f)
+            .putFloat(KEY_ISLAND_OFFSET_X, 0f)
+            .putFloat(KEY_ISLAND_OFFSET_Y, 14f)
+            .apply()
+    }
+
     /** Release page to open when the update banner is tapped. */
     var availableReleaseUrl: String
         get() = prefs.getString(KEY_AVAILABLE_URL, null)
@@ -251,8 +302,20 @@ class LauncherStore(context: Context) {
         private const val KEY_LAST_UPDATE_CHECK = "last_update_check_ms"
         private const val KEY_AVAILABLE_VERSION = "available_version"
         private const val KEY_AVAILABLE_URL = "available_release_url"
+        private const val KEY_ISLAND_SCALE = "island_scale"
+        private const val KEY_ISLAND_WIDTH = "island_width_factor"
+        private const val KEY_ISLAND_OFFSET_X = "island_offset_x_dp"
+        private const val KEY_ISLAND_OFFSET_Y = "island_offset_y_dp"
     }
 }
+
+/** Effective icon-pack style under the GLOBAL GLASS RULE (0.7.0):
+ *  iOS 18 icons never wear glass; iOS 26 icons always do, and the global
+ *  Liquid Glass switch OFF forces everything (icons included) to the
+ *  solid iOS 18 family. This is the single place that decides, so no
+ *  surface can end up glass-off while labelled iOS 26. */
+fun effectiveIconStyle(store: LauncherStore): IconStyle =
+    if (!store.glassEnabled) IconStyle.IOS18 else store.iconStyle
 
 /** Hard cap for the dock blur radius per performance tier: manual
  *  tuning can refine the glass look but never make an Entry-tier

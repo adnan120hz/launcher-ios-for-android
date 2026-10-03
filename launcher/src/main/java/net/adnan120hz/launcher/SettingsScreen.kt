@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.sp
 fun SettingsScreen(
     apps: List<AppEntry>,
     iconStyle: IconStyle,
+    rawIconStyle: IconStyle,
     glassEnabled: Boolean,
     perfTier: PerfTier,
     dockPackages: List<String>,
@@ -86,6 +87,12 @@ fun SettingsScreen(
     onLockEnabledChange: (Boolean) -> Unit,
     onLockPrefsChange: (LockPrefs) -> Unit,
     onLockNow: () -> Unit,
+    islandScale: Float,
+    islandWidthFactor: Float,
+    islandOffsetXDp: Float,
+    islandOffsetYDp: Float,
+    onIslandGeometryChange: (Float, Float, Float, Float) -> Unit,
+    onResetIslandGeometry: () -> Unit,
     onOpenControlCenter: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -97,10 +104,24 @@ fun SettingsScreen(
     }
     val islandRunning = remember(permTick) { IslandState.running }
 
+    // 0.7.0 app-UI surface rule: Liquid Glass ON -> frosted glass plates
+    // over the wallpaper gradient; OFF -> flat solid iOS 18 settings.
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (glassEnabled) {
+            WallpaperBackground(Modifier.fillMaxSize())
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.White.copy(alpha = 0.18f))
+            )
+        }
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFFF2F2F7))
+            .then(
+                if (glassEnabled) Modifier
+                else Modifier.background(Color(0xFFF2F2F7))
+            )
             .padding(20.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -209,11 +230,12 @@ fun SettingsScreen(
                     }
                 }
                 item {
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Gaya Ikon")
                     IconStyle.entries.forEach { style ->
                         RadioRow(
                             label = style.label,
-                            selected = iconStyle == style,
+                            selected = rawIconStyle == style,
                             onClick = { onIconStyleChange(style) }
                         )
                     }
@@ -222,8 +244,18 @@ fun SettingsScreen(
                         fontSize = 12.sp,
                         color = Color(0xFF6E6E73)
                     )
+                    if (!glassEnabled) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Catatan aturan gaya: Liquid Glass sedang MATI, jadi pack yang tampil adalah iOS 18 solid (kaca tidak pernah muncul di mode iOS 18, dan iOS 26 selalu dengan kaca menyala). Nyalakan Liquid Glass di bawah buat mengaktifkan tampilan iOS 26.",
+                            fontSize = 12.sp,
+                            color = Color(0xFF6E6E73)
+                        )
+                    }
+                    }
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Bentuk Ikon")
                     IconShapeType.entries.forEach { shapeType ->
                         RadioRow(
@@ -239,6 +271,8 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    }
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Varian Gelap (pack iOS 26)")
                     ThemeMode.entries.forEach { mode ->
                         RadioRow(
@@ -254,6 +288,8 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    }
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Liquid Glass")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -277,6 +313,8 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    }
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Gaya Animasi Aplikasi")
                     AnimStyle.entries.forEach { style ->
                         RadioRow(
@@ -292,6 +330,8 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    }
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Kaca Dock")
                     Text(
                         text = "Pratinjau langsung — geser slider dan lihat dock berubah saat itu juga:",
@@ -345,6 +385,8 @@ fun SettingsScreen(
                     }
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    }
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Performa")
                     PerfTier.entries.forEach { tier ->
                         RadioRow(
@@ -360,9 +402,12 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    }
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Aplikasi Dock")
                 }
                 items(4) { slotIndex ->
+                    SettingsCard(glassEnabled) {
                     val pkg = dockPackages.getOrNull(slotIndex)
                     val entry = remember(pkg, apps) {
                         pkg?.let {
@@ -401,10 +446,12 @@ fun SettingsScreen(
                         }
                         Text(text = "›", fontSize = 18.sp, color = Color(0xFF6E6E73))
                     }
+                    }
                 }
                 item {
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Control Center")
                     CcStyle.entries.forEach { style ->
                         RadioRow(
@@ -425,8 +472,10 @@ fun SettingsScreen(
                     OutlinedButton(onClick = { onOpenControlCenter() }) {
                         Text("Buka Control Center")
                     }
+                    }
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    SettingsCard(glassEnabled) {
                     SectionTitle("App Library")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -448,8 +497,10 @@ fun SettingsScreen(
                         fontSize = 12.sp,
                         color = Color(0xFF6E6E73)
                     )
+                    }
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Dynamic Island")
                     if (!dynamicIslandUnlocked) {
                         Text(
@@ -547,10 +598,106 @@ fun SettingsScreen(
                             Text("Segarkan status izin")
                         }
                         Text(
-                            text = "Island menampilkan jam, status charging, timer, dan lagu yang diputar (lagu butuh izin akses notifikasi dari baris Musik di Control Center).",
+                            text = "Island menampilkan DATA NYATA saja: jam, charging + persen baterai asli, timer berjalan, dan lagu yang diputar (judul + artis + play/pause — ketuk pill-nya). Kalau izin akses notifikasi belum diberikan, state musik tidak ditampilkan sama sekali (tidak ada state palsu).",
                             fontSize = 12.sp,
                             color = Color(0xFF6E6E73)
                         )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Atur Dynamic Island (berlaku langsung saat digeser):",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Black
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // Live preview of the pill at the chosen geometry.
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(
+                                        width = (150.dp * islandWidthFactor * islandScale)
+                                            .coerceAtMost(330.dp),
+                                        height = (37.dp * islandScale)
+                                            .coerceAtMost(56.dp)
+                                    )
+                                    .offset(x = (islandOffsetXDp * 0.25f).dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(Color.Black),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "21:41",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        SliderRow(
+                            label = "Ukuran island",
+                            valueText = "${(islandScale * 100).toInt()}%",
+                            value = islandScale,
+                            valueRange = 0.8f..1.3f,
+                            enabled = true,
+                            onValueChange = {
+                                onIslandGeometryChange(
+                                    it, islandWidthFactor,
+                                    islandOffsetXDp, islandOffsetYDp
+                                )
+                            }
+                        )
+                        SliderRow(
+                            label = "Lebar island",
+                            valueText = "${(islandWidthFactor * 100).toInt()}%",
+                            value = islandWidthFactor,
+                            valueRange = 0.7f..1.6f,
+                            enabled = true,
+                            onValueChange = {
+                                onIslandGeometryChange(
+                                    islandScale, it,
+                                    islandOffsetXDp, islandOffsetYDp
+                                )
+                            }
+                        )
+                        SliderRow(
+                            label = "Geser kiri–kanan",
+                            valueText = "${islandOffsetXDp.toInt()}dp",
+                            value = islandOffsetXDp,
+                            valueRange = -140f..140f,
+                            enabled = true,
+                            onValueChange = {
+                                onIslandGeometryChange(
+                                    islandScale, islandWidthFactor,
+                                    it, islandOffsetYDp
+                                )
+                            }
+                        )
+                        SliderRow(
+                            label = "Geser atas–bawah",
+                            valueText = "${islandOffsetYDp.toInt()}dp",
+                            value = islandOffsetYDp,
+                            valueRange = 0f..96f,
+                            enabled = true,
+                            onValueChange = {
+                                onIslandGeometryChange(
+                                    islandScale, islandWidthFactor,
+                                    islandOffsetXDp, it
+                                )
+                            }
+                        )
+                        OutlinedButton(onClick = { onResetIslandGeometry() }) {
+                            Text("Reset posisi island (tengah-atas ala iOS)")
+                        }
+                        Text(
+                            text = "Gaya island mengikuti aturan global: gaya iOS 26 terpilih + Liquid Glass menyala = island kaca; selain itu island solid ala iOS 18.",
+                            fontSize = 12.sp,
+                            color = Color(0xFF6E6E73)
+                        )
+                    }
                     }
                 }
                 item {
@@ -567,6 +714,7 @@ fun SettingsScreen(
                 item {
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    SettingsCard(glassEnabled) {
                     SectionTitle("Pembaruan Aplikasi")
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -613,6 +761,7 @@ fun SettingsScreen(
                     OutlinedButton(onClick = { onCheckUpdatesNow() }) {
                         Text("Cek sekarang")
                     }
+                    }
                 }
                 item {
                     Spacer(modifier = Modifier.height(12.dp))
@@ -628,6 +777,39 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+}
+
+/** Frosted-glass group card (0.7.0): Liquid Glass ON -> translucent
+ *  white plate with bright rim over the wallpaper gradient; OFF -> the
+ *  classic solid white iOS 18 settings group. Text inside stays dark,
+ *  readable on both. */
+@Composable
+internal fun SettingsCard(
+    glass: Boolean,
+    content: @Composable () -> Unit
+) {
+    val shape = RoundedCornerShape(18.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(
+                if (glass) Color.White.copy(alpha = 0.78f)
+                else Color.White
+            )
+            .then(
+                if (glass) {
+                    Modifier.border(
+                        1.dp, Color.White.copy(alpha = 0.55f), shape
+                    )
+                } else {
+                    Modifier
+                }
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        content()
     }
 }
 

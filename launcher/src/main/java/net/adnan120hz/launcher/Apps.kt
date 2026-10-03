@@ -19,12 +19,25 @@ data class AppEntry(
     val icon: Drawable
 )
 
-/** All launchable apps (drawer-visible), excluding this launcher itself. */
+/** All launchable apps (drawer-visible), including this launcher itself
+ *  so the user always keeps an "iOS Launcher" entry (label overridden)
+ *  that leads to the launcher settings — even while it is the default
+ *  home app. The launcher's own entry is rendered with the icon pack. */
 fun loadInstalledApps(context: Context): List<AppEntry> {
     val pm = context.packageManager
     val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
     val resolved = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
-    return resolved
+    val selfEntry = try {
+        val info = pm.getApplicationInfo(context.packageName, 0)
+        AppEntry(
+            label = "iOS Launcher",
+            packageName = context.packageName,
+            icon = pm.getApplicationIcon(info)
+        )
+    } catch (e: Exception) {
+        null
+    }
+    val others = resolved
         .mapNotNull { info ->
             val pkg = info.activityInfo.packageName
             if (pkg == context.packageName) return@mapNotNull null
@@ -35,6 +48,7 @@ fun loadInstalledApps(context: Context): List<AppEntry> {
                 icon = info.loadIcon(pm)
             )
         }
+    return (others + listOfNotNull(selfEntry))
         .distinctBy { it.packageName }
         .sortedBy { it.label.lowercase() }
 }
@@ -58,14 +72,43 @@ fun loadAppEntry(context: Context, packageName: String): AppEntry? {
 fun isPackageInstalled(context: Context, packageName: String): Boolean =
     loadAppEntry(context, packageName) != null
 
-fun Drawable.toBitmapSafe(size: Int = 96): Bitmap {
+fun Drawable.toBitmapSafe(size: Int = 192): Bitmap {
     val w = if (intrinsicWidth > 0) intrinsicWidth else size
     val h = if (intrinsicHeight > 0) intrinsicHeight else size
-    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    // Cap the raster at 192px: icons render at <=64dp, so anything bigger
+    // is wasted memory and decode time on scroll (anti-lag).
+    val scale = if (w > 192 || h > 192) {
+        192f / maxOf(w, h)
+    } else {
+        1f
+    }
+    val bw = (w * scale).toInt().coerceAtLeast(1)
+    val bh = (h * scale).toInt().coerceAtLeast(1)
+    val bitmap = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
-    setBounds(0, 0, w, h)
+    setBounds(0, 0, bw, bh)
     draw(canvas)
     return bitmap
+}
+
+/** Tiny decoded-icon bitmap cache so scrolling the App Library / pager
+ *  never re-decodes the same drawable twice (anti-lag). Bounded FIFO. */
+object IconBitmapCache {
+    private const val MAX_ENTRIES = 240
+    private val lock = Any()
+    private val cache = LinkedHashMap<String, Bitmap>(64, 0.75f, false)
+
+    fun get(key: String): Bitmap? = synchronized(lock) { cache[key] }
+
+    fun put(key: String, bitmap: Bitmap) {
+        synchronized(lock) {
+            cache[key] = bitmap
+            while (cache.size > MAX_ENTRIES) {
+                val eldest = cache.entries.firstOrNull()?.key ?: break
+                cache.remove(eldest)
+            }
+        }
+    }
 }
 
 /**
@@ -75,30 +118,35 @@ fun Drawable.toBitmapSafe(size: Int = 96): Bitmap {
  * the new window flies open. Cleared when the launcher resumes (the
  * "close" flight back home) or when an in-app layer takes over, so the
  * blur always washes back out — never gets stuck on.
+ *
+ * Phase 6 (0.7.0): also tracks the landing — when the user comes back,
+ * [landingPackage] names the icon that should spring-land (the system
+ * exit flight itself is system-owned; see README honesty note).
  */
 object OutgoingLaunch {
     var activePackage: String? by mutableStateOf(null)
+    var landingPackage: String? by mutableStateOf(null)
 }
 
-/** Launch an app iOS-style, following the user's animation style:
- *  - iOS 18: classic scale-up from the tapped icon's window bounds.
- *  - iOS 26 fluid: the same icon-to-window flight; the launcher side
- *    adds spring physics + a progressive GPU blur of the home surface
- *    (see [OutgoingLaunch] / HomeScreen). Without known icon bounds it
- *    falls back to a gentle cross-fade instead of the jarring cut. */
 fun launchApp(
     context: Context,
     packageName: String,
     sourceView: View?,
     sourceRect: Rect?
 ) {
+    // Never actually launch ourselves: the caller routes our own entry
+    // to Settings. Guard anyway so a stray caller can't loop us.
+    if (packageName == context.packageName) return
     val launch = context.packageManager.getLaunchIntentForPackage(packageName) ?: return
     launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    val style = LauncherStore(context).animStyle
     // Mark the outgoing launch only now that we know the app exists.
     OutgoingLaunch.activePackage = packageName
+    OutgoingLaunch.landingPackage = null
     val options = when {
         sourceView != null && sourceRect != null && sourceRect.width() > 0 ->
+            // Icon-to-window flight: the target window grows out of the
+            // tapped icon's rect (works for both styles; the launcher
+            // surface adds springs+blur for iOS 26).
             ActivityOptions.makeScaleUpAnimation(
                 sourceView,
                 sourceRect.left,
@@ -106,20 +154,16 @@ fun launchApp(
                 sourceRect.width(),
                 sourceRect.height()
             )
-        style == AnimStyle.IOS26 ->
+        else ->
+            // No known icon bounds: gentle cross-fade instead of a cut.
             ActivityOptions.makeCustomAnimation(
                 context,
                 android.R.anim.fade_in,
                 android.R.anim.fade_out
             )
-        else -> null
     }
     try {
-        if (options != null) {
-            context.startActivity(launch, options.toBundle())
-        } else {
-            context.startActivity(launch)
-        }
+        context.startActivity(launch, options.toBundle())
     } catch (e: Exception) {
         // Launch died after all — don't leave the home surface blurred.
         OutgoingLaunch.activePackage = null

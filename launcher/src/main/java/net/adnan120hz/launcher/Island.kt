@@ -18,7 +18,10 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
@@ -36,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
@@ -114,14 +118,33 @@ class IslandService : Service() {
     private var composeView: ComposeView? = null
     private var owner: OverlayLifecycleOwner? = null
     private var batteryReceiver: BroadcastReceiver? = null
+    private var layoutParams: WindowManager.LayoutParams? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_TIMER) {
-            IslandState.startTimer(60)
+        when (intent?.action) {
+            ACTION_TIMER -> IslandState.startTimer(60)
+            ACTION_REFRESH -> applyGeometry()
         }
         return START_STICKY
+    }
+
+    /** Re-apply the user-tuned geometry (0.7.0) to the live window so
+     *  Settings sliders move the island while it is on screen. */
+    private fun applyGeometry() {
+        val view = composeView ?: return
+        val wm = windowManager ?: return
+        val params = layoutParams ?: return
+        val store = LauncherStore(this)
+        val density = resources.displayMetrics.density
+        params.x = (store.islandOffsetXDp * density).toInt()
+        params.y = (store.islandOffsetYDp * density).toInt()
+        try {
+            wm.updateViewLayout(view, params)
+        } catch (e: Exception) {
+            // view detached; next onCreate applies the stored values
+        }
     }
 
     override fun onCreate() {
@@ -159,17 +182,23 @@ class IslandService : Service() {
         }
         composeView = view
 
+        val store = LauncherStore(this)
+        val density = resources.displayMetrics.density
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            // The pill accepts taps (music play/pause, open the app);
+            // it must NOT steal focus from the app underneath, hence
+            // NOT_FOCUSABLE only (0.7.0: no more NOT_TOUCHABLE).
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = 14
+            x = (store.islandOffsetXDp * density).toInt()
+            y = (store.islandOffsetYDp * density).toInt()
         }
+        layoutParams = params
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         windowManager = wm
         try {
@@ -231,6 +260,7 @@ class IslandService : Service() {
 
     companion object {
         const val ACTION_TIMER = "net.adnan120hz.launcher.action.ISLAND_TIMER"
+        const val ACTION_REFRESH = "net.adnan120hz.launcher.action.ISLAND_REFRESH"
     }
 }
 
@@ -239,6 +269,7 @@ class IslandService : Service() {
 @Composable
 fun IslandPill() {
     val context = LocalContext.current
+    val store = remember { LauncherStore(context) }
     var tick by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -246,6 +277,15 @@ fun IslandPill() {
             tick++
         }
     }
+
+    // User-tuned geometry (0.7.0), re-read every tick so Settings
+    // sliders reshape the island LIVE while it is on screen.
+    val geoScale = store.islandScale
+    val geoWidthFactor = store.islandWidthFactor
+    // GLOBAL GLASS RULE: island is glass ONLY when the iOS 26 style is
+    // effectively picked AND the global Liquid Glass switch is on;
+    // otherwise it renders solid iOS 18. Never glass-off "iOS 26".
+    val glassIsland = store.islandGlassStyleIs26()
 
     // Countdown is computed locally from the shared end-time each tick.
     val timerLeft = if (IslandState.timerEndAt > 0L) {
@@ -260,24 +300,29 @@ fun IslandPill() {
         ?.getString(MediaMetadata.METADATA_KEY_TITLE)
         ?: controller?.metadata
             ?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+    val musicArtist = controller?.metadata
+        ?.getString(MediaMetadata.METADATA_KEY_ARTIST)
     val musicPlaying = controller?.playbackState?.state ==
         android.media.session.PlaybackState.STATE_PLAYING
 
     val charging = IslandState.chargingPct
     val mode = when {
         timerLeft > 0 -> IslandMode.TIMER
-        musicTitle != null -> IslandMode.MUSIC
+        // MUSIC shows ONLY with a real title — no data, no state.
+        !musicTitle.isNullOrBlank() -> IslandMode.MUSIC
         charging >= 0 -> IslandMode.CHARGING
         else -> IslandMode.CLOCK
     }
 
-    val targetWidth = when (mode) {
+    val baseWidth = when (mode) {
         IslandMode.CLOCK -> 118.dp
         IslandMode.CHARGING -> 176.dp
         IslandMode.TIMER -> 196.dp
         IslandMode.MUSIC -> 292.dp
     }
-    val targetHeight = if (mode == IslandMode.CLOCK) 34.dp else 58.dp
+    val baseHeight = if (mode == IslandMode.CLOCK) 34.dp else 58.dp
+    val targetWidth = baseWidth * (geoWidthFactor * geoScale)
+    val targetHeight = baseHeight * geoScale
     val springSpec = spring<androidx.compose.ui.unit.Dp>(
         dampingRatio = Spring.DampingRatioMediumBouncy,
         stiffness = Spring.StiffnessMediumLow
@@ -288,32 +333,79 @@ fun IslandPill() {
     val timeText = remember(tick) {
         SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
     }
+    val fontK = geoScale.coerceIn(0.8f, 1.3f)
 
     Box(
         modifier = Modifier
             .width(width)
             .height(height)
-            .clip(RoundedCornerShape(50))
-            .background(Color.Black)
-            .padding(horizontal = 16.dp),
+            .clip(
+                if (glassIsland) RoundedCornerShape(50)
+                else RoundedCornerShape(34.dp)
+            )
+            .then(
+                if (glassIsland) {
+                    Modifier.background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color(0xFF0A0A12).copy(alpha = 0.94f),
+                                Color(0xFF000000).copy(alpha = 0.97f)
+                            )
+                        )
+                    ).border(
+                        1.dp,
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.White.copy(alpha = 0.45f),
+                                Color.White.copy(alpha = 0.05f)
+                            )
+                        ),
+                        RoundedCornerShape(50)
+                    )
+                } else {
+                    Modifier.background(Color.Black)
+                }
+            )
+            .clickable {
+                // Real actions only: music pill toggles play/pause; any
+                // other state opens the launcher itself.
+                if (mode == IslandMode.MUSIC && controller != null) {
+                    if (musicPlaying) controller.transportControls.pause()
+                    else controller.transportControls.play()
+                } else {
+                    try {
+                        context.startActivity(
+                            Intent(context, MainActivity::class.java)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    } catch (e: Exception) {
+                        // launcher entry refused; nothing else to do
+                    }
+                }
+            }
+            .padding(horizontal = (16 * fontK).dp),
         contentAlignment = Alignment.Center
     ) {
         when (mode) {
             IslandMode.CLOCK -> {
                 Text(
                     text = timeText,
-                    fontSize = 14.sp,
+                    fontSize = (14 * fontK).sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White
                 )
             }
             IslandMode.CHARGING -> {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(text = "⚡", fontSize = 15.sp, color = Color(0xFF30D158))
+                    Text(
+                        text = "↯",
+                        fontSize = (15 * fontK).sp,
+                        color = Color(0xFF30D158)
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Mengisi daya · $charging%",
-                        fontSize = 13.sp,
+                        fontSize = (13 * fontK).sp,
                         color = Color.White
                     )
                 }
@@ -322,11 +414,9 @@ fun IslandPill() {
                 val mm = timerLeft / 60
                 val ss = timerLeft % 60
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(text = "⏱", fontSize = 15.sp, color = Color(0xFFFF9F0A))
-                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Timer %d:%02d".format(mm, ss),
-                        fontSize = 13.sp,
+                        fontSize = (13 * fontK).sp,
                         color = Color.White
                     )
                 }
@@ -334,18 +424,30 @@ fun IslandPill() {
             IslandMode.MUSIC -> {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = if (musicPlaying) "♪" else "⏸",
-                        fontSize = 15.sp,
+                        text = if (musicPlaying) "♪" else "‖",
+                        fontSize = (15 * fontK).sp,
                         color = Color(0xFF30D158)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = musicTitle ?: "",
-                        fontSize = 13.sp,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Column {
+                        Text(
+                            text = musicTitle ?: "",
+                            fontSize = (13 * fontK).sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (!musicArtist.isNullOrBlank()) {
+                            Text(
+                                text = musicArtist,
+                                fontSize = (11 * fontK).sp,
+                                color = Color.White.copy(alpha = 0.75f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
             }
         }
