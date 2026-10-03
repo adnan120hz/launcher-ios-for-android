@@ -146,7 +146,7 @@ fun StripDial(state: CameraState, modifier: Modifier = Modifier) {
         }
         state.quickStops().forEach { stop ->
             val tt = tOf(stop, min, max)
-            val x = w / 2 + (tt - tNow) * w * 1.5f
+            val x = w / 2 + w * ((tt - tNow) * 1.5f)
             if (x > 8.dp && x < w - 24.dp) {
                 Text(
                     formatRatioLabel(stop),

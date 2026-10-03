@@ -335,7 +335,7 @@ fun CameraScreen() {
                 null
             }
             val qualities = try {
-                backInfo?.let { Recorder.getVideoCapabilities(it).supportedQualities }
+                backInfo?.let { Recorder.getVideoCapabilities(it).getSupportedQualities() }
             } catch (e: Throwable) {
                 null
             } ?: listOf(Quality.FHD, Quality.HD)
