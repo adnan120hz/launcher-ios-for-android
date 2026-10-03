@@ -742,18 +742,51 @@ private fun CameraScreenContent() {
     }
 
     // ------------------------------------------------------------ UI
+    val activeGrade = state.activeGrade()
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(
-            factory = { ctx ->
-                PreviewView(ctx).apply {
-                    // PERFORMANCE (SurfaceView) = less viewfinder latency & heat.
-                    implementationMode = PreviewView.ImplementationMode.PERFORMANCE
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
+        // Preview. COMPATIBLE (TextureView) so the live FILTER/STYLES grade
+        // can be previewed via a RenderEffect colour filter on API 31+;
+        // FILL_CENTER crops to this screen's aspect — never stretched.
+        Box(
+            if (activeGrade != null && Build.VERSION.SDK_INT >= 31) {
+                Modifier.fillMaxSize().graphicsLayer {
+                    renderEffect = android.graphics.RenderEffect.createColorFilterEffect(
+                        android.graphics.ColorFilter(
+                            android.graphics.ColorMatrix(activeGrade.matrix)
+                        )
+                    ).asComposeRenderEffect()
                 }
-            },
-            modifier = Modifier.fillMaxSize(),
-            update = { pv -> if (previewView !== pv) previewView = pv }
-        )
+            } else {
+                Modifier.fillMaxSize()
+            }
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    PreviewView(ctx).apply {
+                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                        scaleType = PreviewView.ScaleType.FILL_CENTER
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+                update = { pv -> if (previewView !== pv) previewView = pv }
+            )
+        }
+
+        // Mode-change pulse: a brief dim, like the iOS viewfinder crossfade.
+        if (modePulse.value > 0f) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = modePulse.value))
+            )
+        }
+
+        // Effective capture area: like iOS, everything outside the chosen
+        // aspect is dimmed, so 4:3 / 16:9 / 1:1 visibly reshape the preview
+        // area relative to this phone's screen.
+        if (state.mode == CamMode.PHOTO || state.mode == CamMode.PORTRAIT) {
+            AspectBands(state.aspect)
+        }
 
         // Gesture layer (below all controls).
         Box(
@@ -894,6 +927,34 @@ private fun CameraScreenContent() {
             }
         }
 
+        // Time-lapse indicator.
+        if (state.timelapseRunning) {
+            Row(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 12.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFFF3B30))
+                )
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    "TIME-LAPSE · ${state.timelapseFrames} frame",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+
         // Controls.
         if (state.uiStyle == UiStyle.IOS26) {
             Controls26(state, actions)
@@ -914,12 +975,12 @@ private fun CameraScreenContent() {
             }
         }
 
-        // Capture flash.
+        // Capture blink (black, like iOS).
         if (captureFlash.value > 0f) {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .background(Color.White.copy(alpha = captureFlash.value))
+                    .background(Color.Black.copy(alpha = captureFlash.value))
             )
         }
 
@@ -936,5 +997,44 @@ private fun CameraScreenContent() {
                 Text(msg, color = Color.White, fontSize = 12.sp)
             }
         }
+    }
+}
+
+/**
+ * Dimmed bands outside the effective capture area for the selected aspect,
+ * computed from THIS screen's real proportions — like iOS, where choosing
+ * 4:3 or 1:1 visibly shrinks the live preview area instead of stretching it.
+ */
+@Composable
+private fun BoxScope.AspectBands(aspect: PhotoAspect) {
+    val cfg = LocalConfiguration.current
+    val sw = cfg.screenWidthDp.toFloat()
+    val sh = cfg.screenHeightDp.toFloat()
+    val longSide = maxOf(sw, sh)
+    val shortSide = minOf(sw, sh)
+    if (shortSide <= 0f) return
+    val screenRatio = longSide / shortSide
+    val target = when (aspect) {
+        PhotoAspect.RATIO_4_3 -> 4f / 3f
+        PhotoAspect.RATIO_16_9 -> 16f / 9f
+        PhotoAspect.SQUARE -> 1f
+    }
+    // Aspect wider than (or equal to) the screen: preview already matches.
+    if (target >= screenRatio - 0.02f) return
+    val band = ((longSide - shortSide * target) / 2f).coerceAtLeast(0f)
+    if (band <= 0f) return
+    val color = Color.Black.copy(alpha = 0.55f)
+    if (sh >= sw) {
+        Box(Modifier.fillMaxWidth().height(band.dp).background(color))
+        Box(
+            Modifier.fillMaxWidth().height(band.dp)
+                .align(Alignment.BottomCenter).background(color)
+        )
+    } else {
+        Box(Modifier.fillMaxHeight().width(band.dp).background(color))
+        Box(
+            Modifier.fillMaxHeight().width(band.dp)
+                .align(Alignment.CenterEnd).background(color)
+        )
     }
 }

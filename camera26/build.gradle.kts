@@ -12,8 +12,8 @@ android {
         applicationId = "net.adnan120hz.camera26"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
     }
 
     buildTypes {
@@ -48,4 +48,7 @@ dependencies {
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.extensions)
     implementation(libs.kotlinx.coroutines.android)
+    // ML Kit selfie segmentation: powers the real Portrait fallback
+    // (background blur) on devices whose OEM ships no BOKEH extension.
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
 }
