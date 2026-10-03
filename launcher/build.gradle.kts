@@ -12,8 +12,8 @@ android {
         applicationId = "net.adnan120hz.launcher"
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.5.0"
     }
 
     buildTypes {
@@ -41,4 +41,7 @@ dependencies {
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.material3)
+    // BiometricPrompt for the Phase 4 lock layer (declared literally so
+    // the version catalog stays untouched)
+    implementation("androidx.biometric:biometric:1.1.0")
 }

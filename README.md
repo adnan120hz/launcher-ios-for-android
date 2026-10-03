@@ -43,31 +43,47 @@ honor-system confirmation by design.
 Every screen follows one tidy layout standard: consistent page padding and
 spacing, aligned grids and rows. No cluttered or uneven screens.
 
+## Lock screen honesty note
+
+Android does not let a third-party app replace the system lock screen
+(keyguard). The iOS-style lock screen here is a **display layer shown
+right after your real Android lock** (PIN/pattern/fingerprint) opens —
+the same approach every iOS lock-screen app on Android uses. Your system
+lock stays fully in charge of device security; the fingerprint/face
+prompt on this layer only dismisses the visual layer. This is stated
+again inside the app (Settings › Layar Kunci iOS).
+
 ## Status
 
-**Phase 1: core launcher (v0.2.0).** Ready to test on a device:
+**Phase 4: iOS lock screen (launcher v0.5.0).** On top of phases 0–3
+(paged home, Liquid Glass dock, App Library + search, Control Center in
+iOS 18/iOS 26 styles, Dynamic Island overlay, hand-drawn iOS 18/26 icon
+packs with dark variant, custom icon shapes, per-app custom icons from
+the gallery, live manual dock-glass tuning):
 
-- iOS-style paged home screen (4x5 grid per page, real installed-app icons
-  and labels); tap an icon to launch with a scale-up animation from the
-  icon's position
-- Liquid Glass dock with 4 slots. On Android 12+ (API 31) the dock backdrop
-  is a real RenderEffect blur of the wallpaper layer; on older versions it
-  falls back to a translucent gradient. Dock apps are user-chosen and
-  persistent (first-run defaults: Phone, Messages/Browser, Camera — this
-  project's Camera iOS 26 app when installed — Gallery)
-- App Library as the page after the last home page: all apps grouped A-Z
-  with a search field that filters in real time. The "Search" pill above
-  the dock jumps to it
-- Launcher settings (App Library entry, or long-press the home screen):
-  icon style iOS 26 / iOS 18 (corner radius + shadow for now; redrawn icon
-  packs arrive in Phase 3), Liquid Glass on/off (off = solid iOS-18 style,
-  easier on battery), performance tier Entry/Mid/Flagship (blur radius,
-  Entry also drops icon shadows), dock app picker + reset
-- Onboarding with the TikTok follow gate from Phase 0 is unchanged
+- iOS-style lock layer: big clock + date over your wallpaper, swipe-up
+  indicator, two bottom shortcuts — flashlight (real torch toggle) and
+  camera (opens this project's Camera iOS 26 app, or the system camera)
+- Appears after the screen turns off and the system lock is passed
+  (screen-state watcher service + overlay window), from the "Kunci"
+  button in Settings / Control Center, and as an in-launcher layer when
+  the overlay permission is not granted
+- Swipe up to dismiss; fingerprint/face (BiometricPrompt) is asked when
+  the device has one enrolled and the setting is on, otherwise swipe
+  only. A cancelled biometric attempt offers an explicit swipe fallback
+- Notification stack in iOS style, fed by real notifications once you
+  grant notification access (Settings › Layar Kunci iOS); until then the
+  lock shows an honest "permission needed" card instead of fake entries
+- Full customization in Settings, all live-previewed and persistent:
+  clock size slider, "extended" (bigger & wider) clock, clock color
+  (preset swatches + HSV picker), font weight, wallpaper blur behind
+  the clock, Liquid Glass intensity on lock elements. Lock elements
+  follow the global style — Liquid Glass off or iOS 18 style selected
+  makes them solid iOS-18 style
 
-Still spec for later phases: Control Center (iOS 18 / iOS 26 styles),
-working Dynamic Island overlay, lock screen, motion-blur fluid animations,
-redrawn icon packs, real CameraX camera. Features land phase by phase.
+Still spec for later phases: motion-blur open/close animations
+(iOS 18 / iOS 26 fluid), real CameraX camera polish. Features land
+phase by phase.
 
 Phase 0: project foundation. The launcher skeleton (onboarding, installed-app
 grid, 4-slot glass dock) and the camera UI skeleton build in CI on every push.

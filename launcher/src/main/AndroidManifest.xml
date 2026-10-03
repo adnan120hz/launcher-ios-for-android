@@ -10,6 +10,13 @@
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <!-- Dynamic Island overlay window (granted via ACTION_MANAGE_OVERLAY_PERMISSION) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Phase 4 lock screen: the screen-state watcher runs as a foreground
+         service so Android does not kill it while the display is off -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Fingerprint/face prompt that dismisses the lock display layer -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <application
         android:allowBackup="true"
@@ -45,6 +52,28 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- Phase 4 lock screen watcher + overlay host. Honest scope: this
+             draws an iOS-styled display layer AFTER the Android system
+             lock; it never replaces the system keyguard. -->
+        <service
+            android:name=".LockScreenService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="ios-style lock screen overlay shown after the system lock" />
+        </service>
+
+        <!-- Transparent host for the biometric prompt used by the lock
+             layer (fingerprint/face dismisses the visual layer only). -->
+        <activity
+            android:name=".LockUnlockActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleInstance"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
     </application>
 

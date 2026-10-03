@@ -11,6 +11,7 @@ import android.os.BatteryManager
 import android.os.IBinder
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
+import android.service.notification.StatusBarNotification
 import android.view.Gravity
 import android.view.WindowManager
 import androidx.compose.animation.core.Spring
@@ -58,9 +59,31 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Stub listener: its mere presence (once the user grants notification
- *  access) lets MediaSessionManager hand us the active media sessions. */
-class MusicListenerService : NotificationListenerService()
+/** Presence of this listener (once the user grants notification
+ *  access) lets MediaSessionManager expose now-playing info. Phase 4:
+ *  it also mirrors posted notifications into [LockNotificationStore] so
+ *  the iOS-style lock screen can show a real notification stack. */
+class MusicListenerService : NotificationListenerService() {
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        try {
+            activeNotifications
+                ?.sortedByDescending { it.postTime }
+                ?.forEach { LockNotificationCapture.onPosted(this, it) }
+        } catch (e: Exception) {
+            // best-effort initial snapshot
+        }
+    }
+
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        LockNotificationCapture.onPosted(this, sbn)
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        LockNotificationCapture.onRemoved(sbn)
+    }
+}
 
 enum class IslandMode { CLOCK, CHARGING, TIMER, MUSIC }
 

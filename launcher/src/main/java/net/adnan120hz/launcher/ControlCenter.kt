@@ -68,7 +68,8 @@ fun ControlCenterPanel(
     glassEnabled: Boolean,
     tier: PerfTier,
     screenHeight: Dp,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    onLockNow: () -> Unit
 ) {
     val glass = style == CcStyle.IOS26
     val panelShape = RoundedCornerShape(
@@ -125,6 +126,8 @@ fun ControlCenterPanel(
                     BrightnessRow(glass = glass)
                     Spacer(modifier = Modifier.height(14.dp))
                     MusicRow(glass = glass)
+                    Spacer(modifier = Modifier.height(14.dp))
+                    LockTile(glass = glass, onClick = onLockNow)
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
                         text = "Tarik ke atas atau ketuk di luar panel buat menutup.",
@@ -347,6 +350,26 @@ private fun ConnectivityTiles(glass: Boolean) {
             fontSize = 10.sp,
             color = if (glass) Color.White.copy(alpha = 0.7f) else Color(0xFF6E6E73)
         )
+    }
+}
+
+/** "Lock now" shortcut into the Phase 4 iOS lock layer. */
+@Composable
+private fun LockTile(glass: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Tile(
+            glyph = "🔒",
+            label = "Kunci",
+            state = "Layar kunci iOS",
+            glass = glass,
+            active = false,
+            onClick = onClick,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.weight(1f))
     }
 }
 

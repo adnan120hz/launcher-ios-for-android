@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -70,6 +71,12 @@ fun SettingsScreen(
     onCcStyleChange: (CcStyle) -> Unit,
     onHideSettingsChange: (Boolean) -> Unit,
     onDynamicIslandUnlock: () -> Unit,
+    lockEnabled: Boolean,
+    lockPrefs: LockPrefs,
+    lockGlassStyleIs26: Boolean,
+    onLockEnabledChange: (Boolean) -> Unit,
+    onLockPrefsChange: (LockPrefs) -> Unit,
+    onLockNow: () -> Unit,
     onOpenControlCenter: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -477,6 +484,17 @@ fun SettingsScreen(
                     }
                 }
                 item {
+                    Spacer(modifier = Modifier.height(20.dp))
+                    LockSettingsBlock(
+                        lockEnabled = lockEnabled,
+                        lockPrefs = lockPrefs,
+                        lockGlassStyleIs26 = lockGlassStyleIs26,
+                        onLockEnabledChange = onLockEnabledChange,
+                        onLockPrefsChange = onLockPrefsChange,
+                        onLockNow = onLockNow
+                    )
+                }
+                item {
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedButton(onClick = { onResetDock() }) {
                         Text("Reset Dock ke Default")
@@ -518,6 +536,317 @@ private fun RadioRow(label: String, selected: Boolean, onClick: () -> Unit) {
         Spacer(modifier = Modifier.padding(horizontal = 4.dp))
         Text(text = label, fontSize = 15.sp, color = Color.Black)
     }
+}
+
+/** Phase 4 — Lock screen settings: enable, permissions, live preview,
+ *  and the full clock/glass customization. All changes persist through
+ *  Home (LauncherStore) and preview live as the controls move. */
+@Composable
+private fun LockSettingsBlock(
+    lockEnabled: Boolean,
+    lockPrefs: LockPrefs,
+    lockGlassStyleIs26: Boolean,
+    onLockEnabledChange: (Boolean) -> Unit,
+    onLockPrefsChange: (LockPrefs) -> Unit,
+    onLockNow: () -> Unit
+) {
+    val context = LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    val overlayGranted = remember(tick) { Settings.canDrawOverlays(context) }
+    val serviceRunning = remember(tick) { LockScreenRuntime.serviceRunning }
+    val notifGranted = remember(tick) {
+        notificationListenerGranted(context)
+    }
+    val bioAvailable = remember(tick) { biometricAvailable(context) }
+
+    SectionTitle("Layar Kunci iOS")
+    Text(
+        text = "Batas jujur Android: aplikasi pihak ketiga TIDAK bisa " +
+            "mengganti lockscreen sistem. Layar ini adalah LAPISAN " +
+            "TAMPILAN gaya iOS yang muncul SESUDAH kunci bawaan HP " +
+            "(PIN/pola/sidik jari sistem) terbuka — kunci keamanan " +
+            "Android kamu tetap yang utama dan tidak dilemahkan.",
+        fontSize = 12.sp,
+        color = Color(0xFF6E6E73)
+    )
+    Spacer(modifier = Modifier.height(12.dp))
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "Aktifkan layar kunci iOS",
+            fontSize = 15.sp,
+            color = Color.Black,
+            modifier = Modifier.weight(1f)
+        )
+        Switch(
+            checked = lockEnabled,
+            onCheckedChange = { onLockEnabledChange(it); tick++ }
+        )
+    }
+    Text(
+        text = "Layanan: " + if (serviceRunning) "aktif" else "mati" +
+            " · Izin tampil di atas aplikasi lain: " +
+            if (overlayGranted) "sudah diberikan ✓" else "belum diberikan",
+        fontSize = 12.sp,
+        color = Color(0xFF6E6E73)
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    Row {
+        if (!overlayGranted) {
+            OutlinedButton(onClick = {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}")
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                tick++
+            }) {
+                Text("Izinkan overlay")
+            }
+            Spacer(modifier = Modifier.padding(horizontal = 6.dp))
+        }
+        OutlinedButton(onClick = { onLockNow() }) {
+            Text("Kunci sekarang")
+        }
+        Spacer(modifier = Modifier.padding(horizontal = 6.dp))
+        OutlinedButton(onClick = { tick++ }) {
+            Text("Segarkan status")
+        }
+    }
+    Text(
+        text = "Tanpa izin overlay, layar kunci tampil sebagai lapisan " +
+            "di dalam launcher (tetap muncul sesudah layar mati & dibuka).",
+        fontSize = 12.sp,
+        color = Color(0xFF6E6E73)
+    )
+    Spacer(modifier = Modifier.height(12.dp))
+
+    Text(
+        text = "Notifikasi di layar kunci: " +
+            if (notifGranted) "izin akses sudah diberikan ✓"
+            else "izin akses belum diberikan",
+        fontSize = 14.sp,
+        color = Color.Black
+    )
+    if (!notifGranted) {
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedButton(onClick = {
+            context.startActivity(
+                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            tick++
+        }) {
+            Text("Izinkan akses notifikasi")
+        }
+    }
+    Spacer(modifier = Modifier.height(16.dp))
+
+    Text(
+        text = "Pratinjau langsung — semua slider di bawah mengubahnya saat itu juga:",
+        fontSize = 12.sp,
+        color = Color(0xFF6E6E73)
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    LockPreview(cfg = lockPrefs, glassStyleIs26 = lockGlassStyleIs26)
+    Spacer(modifier = Modifier.height(16.dp))
+
+    SliderRow(
+        label = "Ukuran jam",
+        valueText = "${(lockPrefs.clockScale * 100).toInt()}%",
+        value = lockPrefs.clockScale,
+        valueRange = 0.7f..1.4f,
+        enabled = true,
+        onValueChange = {
+            onLockPrefsChange(lockPrefs.copy(clockScale = it))
+        }
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "Jam diperpanjang (lebih besar & lebar)",
+            fontSize = 14.sp,
+            color = Color.Black,
+            modifier = Modifier.weight(1f)
+        )
+        Switch(
+            checked = lockPrefs.clockExtended,
+            onCheckedChange = {
+                onLockPrefsChange(lockPrefs.copy(clockExtended = it))
+            }
+        )
+    }
+    Spacer(modifier = Modifier.height(8.dp))
+
+    Text(
+        text = "Warna jam",
+        fontSize = 14.sp,
+        color = Color.Black
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    LockColorEditor(
+        colorArgb = lockPrefs.clockColorArgb,
+        onColorChange = {
+            onLockPrefsChange(lockPrefs.copy(clockColorArgb = it))
+        }
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+
+    SliderRow(
+        label = "Ketebalan font jam",
+        valueText = "${lockPrefs.clockWeight}",
+        value = lockPrefs.clockWeight.toFloat(),
+        valueRange = 200f..900f,
+        enabled = true,
+        onValueChange = {
+            val snapped = (it / 100).toInt() * 100
+            onLockPrefsChange(lockPrefs.copy(clockWeight = snapped))
+        }
+    )
+    SliderRow(
+        label = "Blur wallpaper di belakang jam",
+        valueText = "${lockPrefs.wallpaperBlurDp.toInt()}dp (dibatasi tier performa)",
+        value = lockPrefs.wallpaperBlurDp,
+        valueRange = 0f..40f,
+        enabled = true,
+        onValueChange = {
+            onLockPrefsChange(lockPrefs.copy(wallpaperBlurDp = it))
+        }
+    )
+    SliderRow(
+        label = "Intensitas Liquid Glass elemen kunci",
+        valueText = "${(lockPrefs.glassIntensity * 100).toInt()}%",
+        value = lockPrefs.glassIntensity,
+        valueRange = 0f..1f,
+        enabled = lockGlassStyleIs26,
+        onValueChange = {
+            onLockPrefsChange(lockPrefs.copy(glassIntensity = it))
+        }
+    )
+    Text(
+        text = if (lockGlassStyleIs26) {
+            "Gaya elemen kunci mengikuti gaya global (iOS 26 Liquid Glass)."
+        } else {
+            "Gaya kunci sekarang solid ala iOS 18 (Liquid Glass mati atau gaya iOS 18 dipilih) — slider kaca nonaktif."
+        },
+        fontSize = 12.sp,
+        color = Color(0xFF6E6E73)
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "Buka dengan sidik jari/wajah",
+            fontSize = 14.sp,
+            color = Color.Black,
+            modifier = Modifier.weight(1f)
+        )
+        Switch(
+            checked = lockPrefs.useBiometric,
+            onCheckedChange = {
+                onLockPrefsChange(lockPrefs.copy(useBiometric = it))
+            }
+        )
+    }
+    Text(
+        text = if (bioAvailable) {
+            "Geser ke atas di layar kunci akan meminta sidik jari/wajah. Biometrik ini hanya membuka lapisan tampilan, bukan pengganti kunci sistem."
+        } else {
+            "HP ini belum ada sidik jari/wajah yang terdaftar — membuka kunci cukup geser ke atas."
+        },
+        fontSize = 12.sp,
+        color = Color(0xFF6E6E73)
+    )
+}
+
+/** Clock color picker: preset swatches + a simple HSV slider trio. */
+@Composable
+private fun LockColorEditor(
+    colorArgb: Int,
+    onColorChange: (Int) -> Unit
+) {
+    val swatches = listOf(
+        "Putih" to 0xFFFFFFFF.toInt(),
+        "Hitam" to 0xFF111111.toInt(),
+        "Kuning" to 0xFFFFD60A.toInt(),
+        "Biru" to 0xFF0A84FF.toInt(),
+        "Hijau" to 0xFF30D158.toInt(),
+        "Pink" to 0xFFFF6482.toInt(),
+        "Ungu" to 0xFFBF5AF2.toInt()
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        swatches.forEach { (_, argb) ->
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color(argb))
+                    .border(
+                        width = if (argb == colorArgb) 3.dp else 1.dp,
+                        color = if (argb == colorArgb) {
+                            Color(0xFF007AFF)
+                        } else {
+                            Color.Black.copy(alpha = 0.25f)
+                        },
+                        shape = RoundedCornerShape(50)
+                    )
+                    .clickable { onColorChange(argb) }
+            )
+        }
+    }
+    Spacer(modifier = Modifier.height(10.dp))
+
+    val baseHsv = remember(colorArgb) {
+        FloatArray(3).also {
+            android.graphics.Color.colorToHSV(colorArgb, it)
+        }
+    }
+    var hue by remember(colorArgb) { mutableStateOf(baseHsv[0]) }
+    var sat by remember(colorArgb) { mutableStateOf(baseHsv[1]) }
+    var value by remember(colorArgb) { mutableStateOf(baseHsv[2]) }
+    fun applyHsv() {
+        onColorChange(
+            android.graphics.Color.HSVToColor(
+                floatArrayOf(hue, sat, value)
+            )
+        )
+    }
+    SliderRow(
+        label = "Hue",
+        valueText = "${hue.toInt()}°",
+        value = hue,
+        valueRange = 0f..360f,
+        enabled = true,
+        onValueChange = { hue = it; applyHsv() }
+    )
+    SliderRow(
+        label = "Saturasi",
+        valueText = "${(sat * 100).toInt()}%",
+        value = sat,
+        valueRange = 0f..1f,
+        enabled = true,
+        onValueChange = { sat = it; applyHsv() }
+    )
+    SliderRow(
+        label = "Terang",
+        valueText = "${(value * 100).toInt()}%",
+        value = value,
+        valueRange = 0f..1f,
+        enabled = true,
+        onValueChange = { value = it; applyHsv() }
+    )
 }
 
 @Composable

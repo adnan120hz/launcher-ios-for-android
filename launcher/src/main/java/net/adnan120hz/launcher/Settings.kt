@@ -133,6 +133,42 @@ class LauncherStore(context: Context) {
         (if (dockBlurDp >= 0f) dockBlurDp else perfTier.blurRadiusDp)
             .coerceAtMost(blurCapDp(perfTier))
 
+    /** Lock screen master switch (Phase 4). */
+    var lockEnabled: Boolean
+        get() = prefs.getBoolean(KEY_LOCK_ENABLED, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_LOCK_ENABLED, value).apply()
+        }
+
+    /** Lock screen appearance as one snapshot (Phase 4). Compared by the
+     *  Settings sliders; written back field by field. */
+    fun lockPrefs(): LockPrefs = LockPrefs(
+        clockScale = prefs.getFloat(KEY_LOCK_CLOCK_SCALE, 1.0f),
+        clockColorArgb = prefs.getInt(KEY_LOCK_CLOCK_COLOR, 0xFFFFFFFF.toInt()),
+        clockWeight = prefs.getInt(KEY_LOCK_CLOCK_WEIGHT, 700),
+        clockExtended = prefs.getBoolean(KEY_LOCK_CLOCK_EXTENDED, false),
+        wallpaperBlurDp = prefs.getFloat(KEY_LOCK_WALLPAPER_BLUR, 18f),
+        glassIntensity = prefs.getFloat(KEY_LOCK_GLASS_INTENSITY, 0.6f),
+        useBiometric = prefs.getBoolean(KEY_LOCK_USE_BIOMETRIC, true)
+    )
+
+    fun saveLockPrefs(p: LockPrefs) {
+        prefs.edit()
+            .putFloat(KEY_LOCK_CLOCK_SCALE, p.clockScale)
+            .putInt(KEY_LOCK_CLOCK_COLOR, p.clockColorArgb)
+            .putInt(KEY_LOCK_CLOCK_WEIGHT, p.clockWeight)
+            .putBoolean(KEY_LOCK_CLOCK_EXTENDED, p.clockExtended)
+            .putFloat(KEY_LOCK_WALLPAPER_BLUR, p.wallpaperBlurDp)
+            .putFloat(KEY_LOCK_GLASS_INTENSITY, p.glassIntensity)
+            .putBoolean(KEY_LOCK_USE_BIOMETRIC, p.useBiometric)
+            .apply()
+    }
+
+    /** Lock elements follow the global style choice: Liquid Glass toggle
+     *  OFF (or the iOS 18 style picked) = solid iOS-18 lock elements. */
+    fun lockGlassStyleIs26(): Boolean =
+        effectiveCcStyle() == CcStyle.IOS26
+
     companion object {
         const val PREFS_NAME = "launcher_prefs"
         private const val KEY_ICON_STYLE = "icon_style"
@@ -146,6 +182,14 @@ class LauncherStore(context: Context) {
         private const val KEY_DOCK_BLUR = "dock_blur_dp"
         private const val KEY_DOCK_TINT_ALPHA = "dock_tint_alpha"
         private const val KEY_DOCK_TINT_DARK = "dock_tint_dark"
+        private const val KEY_LOCK_ENABLED = "lock_enabled"
+        private const val KEY_LOCK_CLOCK_SCALE = "lock_clock_scale"
+        private const val KEY_LOCK_CLOCK_COLOR = "lock_clock_color"
+        private const val KEY_LOCK_CLOCK_WEIGHT = "lock_clock_weight"
+        private const val KEY_LOCK_CLOCK_EXTENDED = "lock_clock_extended"
+        private const val KEY_LOCK_WALLPAPER_BLUR = "lock_wallpaper_blur"
+        private const val KEY_LOCK_GLASS_INTENSITY = "lock_glass_intensity"
+        private const val KEY_LOCK_USE_BIOMETRIC = "lock_use_biometric"
     }
 }
 

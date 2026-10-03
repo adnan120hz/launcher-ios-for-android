@@ -1,7 +1,14 @@
 package net.adnan120hz.launcher
 
+import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Rect
 import android.os.Build
+import android.provider.MediaStore
+import android.provider.Settings
 import android.view.View
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -69,6 +76,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -552,6 +562,117 @@ fun HomeScreen(
     var showSettings by remember { mutableStateOf(false) }
     var showControlCenter by remember { mutableStateOf(false) }
 
+    // ---- Phase 4: iOS lock screen -------------------------------------
+    // The overlay service is the primary surface; this in-app layer is
+    // the fallback for when the overlay window cannot be drawn. Both
+    // render the same LockScreenContent.
+    var lockEnabled by remember { mutableStateOf(store.lockEnabled) }
+    var lockPrefs by remember { mutableStateOf(store.lockPrefs()) }
+    var showLockInApp by remember { mutableStateOf(false) }
+    var lockFallbackVisible by remember { mutableStateOf(false) }
+
+    val lockUnlockLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            showLockInApp = false
+            lockFallbackVisible = false
+        } else {
+            // Cancelled/failed: stay locked, offer the swipe-only exit.
+            lockFallbackVisible = true
+        }
+    }
+
+    fun requestLockUnlock() {
+        if (lockPrefs.useBiometric && biometricAvailable(context)) {
+            lockUnlockLauncher.launch(
+                Intent(context, LockUnlockActivity::class.java)
+            )
+        } else {
+            showLockInApp = false
+            lockFallbackVisible = false
+        }
+    }
+
+    /** "Kunci sekarang" (Settings / Control Center): prefer the overlay
+     *  window; fall back to the in-app layer when overlay is not granted. */
+    fun lockNow() {
+        showControlCenter = false
+        if (Settings.canDrawOverlays(context)) {
+            try {
+                context.startService(
+                    Intent(context, LockScreenService::class.java)
+                        .setAction(LockScreenService.ACTION_SHOW)
+                )
+            } catch (e: Exception) {
+                showLockInApp = true
+                lockFallbackVisible = false
+            }
+        } else {
+            showLockInApp = true
+            lockFallbackVisible = false
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                if (intent.action == Intent.ACTION_SCREEN_OFF) {
+                    LockScreenRuntime.screenOffPending = true
+                }
+            }
+        }
+        context.registerReceiver(
+            receiver,
+            IntentFilter(Intent.ACTION_SCREEN_OFF)
+        )
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME &&
+                LockScreenRuntime.screenOffPending
+            ) {
+                LockScreenRuntime.screenOffPending = false
+                // The service (when running) shows the overlay itself.
+                if (lockEnabled && !LockScreenRuntime.serviceRunning) {
+                    showLockInApp = true
+                    lockFallbackVisible = false
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (e: Exception) {
+                // already unregistered
+            }
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // The service could not draw its overlay -> show the lock here.
+    LaunchedEffect(LockScreenRuntime.showInAppRequest) {
+        if (LockScreenRuntime.showInAppRequest) {
+            LockScreenRuntime.showInAppRequest = false
+            showLockInApp = true
+            lockFallbackVisible = false
+        }
+    }
+
+    // Bring the lock service back when the launcher opens with the
+    // feature switched on (e.g. after the process was killed).
+    LaunchedEffect(Unit) {
+        if (store.lockEnabled && !LockScreenRuntime.serviceRunning) {
+            try {
+                context.startService(
+                    Intent(context, LockScreenService::class.java)
+                )
+            } catch (e: Exception) {
+                // Platform refused the start; in-app layer still works.
+            }
+        }
+    }
+
     val apps by produceState<List<AppEntry>>(initialValue = emptyList()) {
         value = withContext(Dispatchers.IO) { loadInstalledApps(context) }
     }
@@ -610,6 +731,40 @@ fun HomeScreen(
         }
     }
 
+    if (showLockInApp) {
+        LockScreenContent(
+            cfg = lockPrefs,
+            glassStyleIs26 = store.lockGlassStyleIs26(),
+            maxBlurDp = blurCapDp(perfTier),
+            notifications = LockNotificationStore.items,
+            notifAccessGranted = notificationListenerGranted(context),
+            showFallback = lockFallbackVisible,
+            onRequestUnlock = { requestLockUnlock() },
+            onDismissFallback = {
+                showLockInApp = false
+                lockFallbackVisible = false
+            },
+            onCameraClick = {
+                showLockInApp = false
+                lockFallbackVisible = false
+                val pkg = "net.adnan120hz.camera26"
+                if (isPackageInstalled(context, pkg)) {
+                    launchApp(context, pkg, rootView, null)
+                } else {
+                    try {
+                        context.startActivity(
+                            Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    } catch (e: Exception) {
+                        // no camera app on this device
+                    }
+                }
+            }
+        )
+        return
+    }
+
     if (showSettings) {
         SettingsScreen(
             apps = apps,
@@ -656,6 +811,35 @@ fun HomeScreen(
                 store.hideSettingsInLibrary = it
             },
             onDynamicIslandUnlock = onDynamicIslandUnlock,
+            lockEnabled = lockEnabled,
+            lockPrefs = lockPrefs,
+            lockGlassStyleIs26 = store.lockGlassStyleIs26(),
+            onLockEnabledChange = { enabled ->
+                lockEnabled = enabled
+                store.lockEnabled = enabled
+                try {
+                    if (enabled) {
+                        context.startService(
+                            Intent(context, LockScreenService::class.java)
+                        )
+                    } else {
+                        context.stopService(
+                            Intent(context, LockScreenService::class.java)
+                        )
+                    }
+                } catch (e: Exception) {
+                    // Platform refused; the toggle stays stored and the
+                    // in-app layer remains the fallback path.
+                }
+            },
+            onLockPrefsChange = { updated ->
+                lockPrefs = updated
+                store.saveLockPrefs(updated)
+            },
+            onLockNow = {
+                showSettings = false
+                lockNow()
+            },
             onOpenControlCenter = {
                 showSettings = false
                 showControlCenter = true
@@ -770,7 +954,8 @@ fun HomeScreen(
                 glassEnabled = glassEnabled,
                 tier = perfTier,
                 screenHeight = screenHeight,
-                onClose = { showControlCenter = false }
+                onClose = { showControlCenter = false },
+                onLockNow = { lockNow() }
             )
         }
 
