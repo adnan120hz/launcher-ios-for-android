@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.DynamicRange
 import androidx.camera.video.Quality
 import androidx.camera.video.Recorder
 import androidx.camera.view.PreviewView
@@ -335,7 +336,7 @@ fun CameraScreen() {
                 null
             }
             val qualities = try {
-                backInfo?.let { Recorder.getVideoCapabilities(it).getSupportedQualities() }
+                backInfo?.let { Recorder.getVideoCapabilities(it).getSupportedQualities(DynamicRange.SDR) }
             } catch (e: Throwable) {
                 null
             } ?: listOf(Quality.FHD, Quality.HD)
