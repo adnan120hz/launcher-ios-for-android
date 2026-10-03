@@ -4,6 +4,7 @@ import android.graphics.Rect
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -37,10 +38,10 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun AppLibraryScreen(
     apps: List<AppEntry>,
-    iconStyle: IconStyle,
-    shadowsEnabled: Boolean,
+    cfg: IconConfig,
     dynamicIslandUnlocked: Boolean,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onIconLongPress: (AppEntry) -> Unit
 ) {
     val context = LocalContext.current
     val rootView = LocalView.current
@@ -169,17 +170,19 @@ fun AppLibraryScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .clickable {
-                                    launchApp(context, app.packageName, rootView, rect)
-                                }
+                                .combinedClickable(
+                                    onClick = {
+                                        launchApp(context, app.packageName, rootView, rect)
+                                    },
+                                    onLongClick = { onIconLongPress(app) }
+                                )
                                 .padding(vertical = 6.dp, horizontal = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             AppIconImage(
                                 app = app,
                                 sizeDp = 44.dp,
-                                iconStyle = iconStyle,
-                                shadowsEnabled = shadowsEnabled,
+                                cfg = cfg,
                                 onBounds = { rect = it }
                             )
                             Spacer(modifier = Modifier.padding(horizontal = 6.dp))

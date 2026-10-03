@@ -3,9 +3,10 @@ package net.adnan120hz.launcher
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,8 +32,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -46,8 +48,21 @@ fun SettingsScreen(
     dockPackages: List<String>,
     ccStyle: CcStyle,
     hideSettingsInLibrary: Boolean,
+    iconConfig: IconConfig,
+    iconShape: IconShapeType,
+    themeMode: ThemeMode,
+    dockBlurDp: Float,
+    dockBlurMax: Float,
+    dockTintAlpha: Float,
+    dockTintDark: Float,
     dynamicIslandUnlocked: Boolean,
     onIconStyleChange: (IconStyle) -> Unit,
+    onIconShapeChange: (IconShapeType) -> Unit,
+    onThemeModeChange: (ThemeMode) -> Unit,
+    onDockBlurChange: (Float) -> Unit,
+    onDockTintAlphaChange: (Float) -> Unit,
+    onDockTintDarkChange: (Float) -> Unit,
+    onResetDockGlass: () -> Unit,
     onGlassChange: (Boolean) -> Unit,
     onTierChange: (PerfTier) -> Unit,
     onDockChange: (List<String>) -> Unit,
@@ -119,15 +134,10 @@ fun SettingsScreen(
                             .padding(vertical = 8.dp, horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val bmp = remember(app.packageName) {
-                            app.icon.toBitmapSafe().asImageBitmap()
-                        }
-                        Image(
-                            bitmap = bmp,
-                            contentDescription = app.label,
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                        AppIconImage(
+                            app = app,
+                            sizeDp = 40.dp,
+                            cfg = iconConfig
                         )
                         Spacer(modifier = Modifier.padding(horizontal = 6.dp))
                         Text(text = app.label, fontSize = 15.sp, color = Color.Black)
@@ -146,7 +156,37 @@ fun SettingsScreen(
                         )
                     }
                     Text(
-                        text = "Baru memengaruhi radius sudut & bayangan ikon; pack ikon gambar ulang menyusul di fase berikutnya.",
+                        text = "Pack ikon gambar ulang buatan sendiri bergaya iOS 18 / iOS 26 buat aplikasi umum (Telepon, Kamera, Galeri, dll). Aplikasi lain tetap pakai ikon aslinya, dibingkai masker gaya iOS biar seragam.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    SectionTitle("Bentuk Ikon")
+                    IconShapeType.entries.forEach { shapeType ->
+                        RadioRow(
+                            label = shapeType.label,
+                            selected = iconShape == shapeType,
+                            onClick = { onIconShapeChange(shapeType) }
+                        )
+                    }
+                    Text(
+                        text = "Berlaku ke semua ikon: pack gambar ulang, ikon asli berbingkai, dan ikon custom dari gambar kamu.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    SectionTitle("Varian Gelap (pack iOS 26)")
+                    ThemeMode.entries.forEach { mode ->
+                        RadioRow(
+                            label = mode.label,
+                            selected = themeMode == mode,
+                            onClick = { onThemeModeChange(mode) }
+                        )
+                    }
+                    Text(
+                        text = "\"Ikuti sistem\" mengikuti tema gelap/terang Android kamu. Varian gelap memakai palet ikon gelap ala iOS 26.",
                         fontSize = 12.sp,
                         color = Color(0xFF6E6E73)
                     )
@@ -173,6 +213,59 @@ fun SettingsScreen(
                         fontSize = 12.sp,
                         color = Color(0xFF6E6E73)
                     )
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    SectionTitle("Kaca Dock")
+                    Text(
+                        text = "Pratinjau langsung — geser slider dan lihat dock berubah saat itu juga:",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    DockGlassPreview(
+                        glassEnabled = glassEnabled,
+                        perfTier = perfTier,
+                        iconStyle = iconStyle,
+                        iconDark = iconConfig.dark,
+                        iconShape = iconShape,
+                        blurDp = dockBlurDp,
+                        tintAlpha = dockTintAlpha,
+                        tintDark = dockTintDark
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    SliderRow(
+                        label = "Blur kaca dock",
+                        valueText = "${dockBlurDp.toInt()}dp (maks tier ini ${dockBlurMax.toInt()}dp)",
+                        value = dockBlurDp,
+                        valueRange = 0f..dockBlurMax,
+                        enabled = glassEnabled,
+                        onValueChange = { onDockBlurChange(it) }
+                    )
+                    SliderRow(
+                        label = "Kekuatan tint putih kaca",
+                        valueText = "${(dockTintAlpha * 100).toInt()}%",
+                        value = dockTintAlpha,
+                        valueRange = 0f..0.6f,
+                        enabled = glassEnabled,
+                        onValueChange = { onDockTintAlphaChange(it) }
+                    )
+                    SliderRow(
+                        label = "Kegelapan tint dock",
+                        valueText = "${(dockTintDark * 100).toInt()}%",
+                        value = dockTintDark,
+                        valueRange = 0f..1f,
+                        enabled = glassEnabled,
+                        onValueChange = { onDockTintDarkChange(it) }
+                    )
+                    Text(
+                        text = "Berguna sesudah ganti wallpaper: atur blur & tint dock sampai serasi, berlaku LIVE. Batas blur mengikuti tier performa (Entry dibatasi biar tetap hemat & smooth).",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(onClick = { onResetDockGlass() }) {
+                        Text("Reset kaca dock ke default tier")
+                    }
                     Spacer(modifier = Modifier.height(20.dp))
 
                     SectionTitle("Performa")
@@ -209,15 +302,10 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (entry != null) {
-                            val bmp = remember(entry.packageName) {
-                                entry.icon.toBitmapSafe().asImageBitmap()
-                            }
-                            Image(
-                                bitmap = bmp,
-                                contentDescription = entry.label,
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(10.dp))
+                            AppIconImage(
+                                app = entry,
+                                sizeDp = 40.dp,
+                                cfg = iconConfig
                             )
                             Spacer(modifier = Modifier.padding(horizontal = 6.dp))
                             Text(
@@ -429,5 +517,98 @@ private fun RadioRow(label: String, selected: Boolean, onClick: () -> Unit) {
         RadioButton(selected = selected, onClick = onClick)
         Spacer(modifier = Modifier.padding(horizontal = 4.dp))
         Text(text = label, fontSize = 15.sp, color = Color.Black)
+    }
+}
+
+@Composable
+private fun SliderRow(
+    label: String,
+    valueText: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    enabled: Boolean,
+    onValueChange: (Float) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            color = Color.Black,
+            modifier = Modifier.weight(1f)
+        )
+        Text(text = valueText, fontSize = 12.sp, color = Color(0xFF6E6E73))
+    }
+    Slider(
+        value = value,
+        onValueChange = onValueChange,
+        valueRange = valueRange,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+/** Live dock preview: the real glass renderer driven by the slider
+ *  values, so the user sees the dock change while dragging. */
+@Composable
+private fun DockGlassPreview(
+    glassEnabled: Boolean,
+    perfTier: PerfTier,
+    iconStyle: IconStyle,
+    iconDark: Boolean,
+    iconShape: IconShapeType,
+    blurDp: Float,
+    tintAlpha: Float,
+    tintDark: Float
+) {
+    val shape = RoundedCornerShape(26.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(104.dp)
+            .clip(shape)
+    ) {
+        GlassBackground(
+            shape = shape,
+            glassEnabled = glassEnabled,
+            tier = perfTier,
+            screenHeight = 300.dp,
+            bottomInset = 0.dp,
+            modifier = Modifier.matchParentSize(),
+            blurRadiusDp = blurDp,
+            tintAlpha = tintAlpha,
+            tintDarkness = tintDark
+        )
+        Row(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .fillMaxWidth()
+                .padding(horizontal = 30.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            listOf(
+                IconKind.PHONE,
+                IconKind.MESSAGES,
+                IconKind.CAMERA,
+                IconKind.GALLERY
+            ).forEach { kind ->
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .shadow(6.dp, iconShape.shape())
+                        .clip(iconShape.shape())
+                ) {
+                    PackIcon(
+                        kind = kind,
+                        style = iconStyle,
+                        dark = iconDark,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
+            }
+        }
     }
 }

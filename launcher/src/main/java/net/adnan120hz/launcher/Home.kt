@@ -3,17 +3,22 @@ package net.adnan120hz.launcher
 import android.graphics.Rect
 import android.os.Build
 import android.view.View
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -49,14 +54,17 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -83,15 +91,22 @@ fun WallpaperBackground(modifier: Modifier = Modifier) {
  * clipped to [shape] and aligned so the gradient matches the wallpaper
  * behind the element. On API 29-30 (or with glass off) it falls back to
  * a translucent gradient / solid iOS-18 style fill.
+ *
+ * [blurRadiusDp] overrides the tier blur (already tier-capped by the
+ * caller); [tintAlpha] is the white glass tint strength and
+ * [tintDarkness] mixes a black shade over it — the manual dock tuning.
  */
 @Composable
-private fun GlassBackground(
+internal fun GlassBackground(
     shape: RoundedCornerShape,
     glassEnabled: Boolean,
     tier: PerfTier,
     screenHeight: Dp,
     bottomInset: Dp,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    blurRadiusDp: Float? = null,
+    tintAlpha: Float = 0.20f,
+    tintDarkness: Float = 0f
 ) {
     Box(modifier.clip(shape)) {
         when {
@@ -102,15 +117,24 @@ private fun GlassBackground(
                         .fillMaxWidth()
                         .requiredHeight(screenHeight)
                         .offset(y = bottomInset)
-                        .blur(tier.blurRadiusDp.dp)
+                        .blur((blurRadiusDp ?: tier.blurRadiusDp).dp)
                 ) {
                     WallpaperBackground(Modifier.fillMaxSize())
                 }
                 Box(
                     Modifier
                         .matchParentSize()
-                        .background(Color.White.copy(alpha = 0.20f))
+                        .background(Color.White.copy(alpha = tintAlpha))
                 )
+                if (tintDarkness > 0f) {
+                    Box(
+                        Modifier
+                            .matchParentSize()
+                            .background(
+                                Color.Black.copy(alpha = tintDarkness * 0.55f)
+                            )
+                    )
+                }
             }
             glassEnabled -> {
                 Box(
@@ -125,12 +149,27 @@ private fun GlassBackground(
                             )
                         )
                 )
+                if (tintDarkness > 0f) {
+                    Box(
+                        Modifier
+                            .matchParentSize()
+                            .background(
+                                Color.Black.copy(alpha = tintDarkness * 0.55f)
+                            )
+                    )
+                }
             }
             else -> {
                 Box(
                     Modifier
                         .matchParentSize()
-                        .background(Color(0xFFEDEFF2).copy(alpha = 0.96f))
+                        .background(
+                            lerp(
+                                Color(0xFFEDEFF2).copy(alpha = 0.96f),
+                                Color.Black.copy(alpha = 0.96f),
+                                tintDarkness * 0.35f
+                            )
+                        )
                 )
             }
         }
@@ -147,27 +186,44 @@ private fun GlassBackground(
     }
 }
 
-/** Plain app icon image; reports its window bounds for launch animation. */
+/**
+ * App icon renderer — Phase 3 priority:
+ *  1. user-picked custom image (persistent PNG), if any;
+ *  2. hand-drawn pack icon for classified apps (iOS 18 flat /
+ *     iOS 26 liquid glass incl. dark variant);
+ *  3. the app's original icon, framed with the iOS shape mask and
+ *     pack styling (iOS 26 gets a glossy top highlight + edge light).
+ *
+ * Reports its window bounds for the launch scale-up animation.
+ */
 @Composable
 fun AppIconImage(
     app: AppEntry,
     sizeDp: Dp,
-    iconStyle: IconStyle,
-    shadowsEnabled: Boolean,
+    cfg: IconConfig,
     modifier: Modifier = Modifier,
     onBounds: ((Rect) -> Unit)? = null
 ) {
-    val iconBitmap = remember(app.packageName) { app.icon.toBitmapSafe().asImageBitmap() }
-    val radius = if (iconStyle == IconStyle.IOS26) 15.dp else 12.dp
-    val shape = RoundedCornerShape(radius)
+    val context = LocalContext.current
+    val shape = cfg.shape.shape()
     val elevation = when {
-        !shadowsEnabled -> 0.dp
-        iconStyle == IconStyle.IOS26 -> 8.dp
+        !cfg.shadowsEnabled -> 0.dp
+        cfg.style == IconStyle.IOS26 -> 8.dp
         else -> 4.dp
     }
-    Image(
-        bitmap = iconBitmap,
-        contentDescription = app.label,
+    val customBitmap = remember(app.packageName, cfg.customTick) {
+        CustomIconStore.bitmap(context, app.packageName)
+    }
+    val kind = cfg.kindByPackage[app.packageName]
+    val originalBitmap = remember(app.packageName, kind, customBitmap) {
+        if (customBitmap == null && kind == null) {
+            app.icon.toBitmapSafe().asImageBitmap()
+        } else {
+            null
+        }
+    }
+
+    Box(
         modifier = modifier
             .size(sizeDp)
             .onGloballyPositioned { coords ->
@@ -186,15 +242,69 @@ fun AppIconImage(
             }
             .shadow(elevation, shape)
             .clip(shape)
-    )
+    ) {
+        when {
+            customBitmap != null -> {
+                Image(
+                    bitmap = customBitmap.asImageBitmap(),
+                    contentDescription = app.label,
+                    modifier = Modifier.matchParentSize()
+                )
+            }
+            kind != null -> {
+                PackIcon(
+                    kind = kind,
+                    style = cfg.style,
+                    dark = cfg.dark,
+                    modifier = Modifier.matchParentSize()
+                )
+            }
+            else -> {
+                if (originalBitmap != null) {
+                    Image(
+                        bitmap = originalBitmap,
+                        contentDescription = app.label,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
+            }
+        }
+        // iOS 26 pack treatment over framed original / custom icons:
+        // glassy top highlight + bright edge.
+        if (cfg.style == IconStyle.IOS26 && kind == null) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.White.copy(alpha = if (cfg.dark) 0.20f else 0.30f),
+                                Color.White.copy(alpha = 0.06f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+            )
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .border(
+                        1.dp,
+                        Color.White.copy(alpha = if (cfg.dark) 0.30f else 0.55f),
+                        shape
+                    )
+            )
+        }
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AppIconCell(
     app: AppEntry,
-    iconStyle: IconStyle,
-    shadowsEnabled: Boolean,
-    rootView: View
+    cfg: IconConfig,
+    rootView: View,
+    onIconLongPress: (AppEntry) -> Unit
 ) {
     val context = LocalContext.current
     var rect by remember { mutableStateOf<Rect?>(null) }
@@ -202,15 +312,17 @@ fun AppIconCell(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .clickable { launchApp(context, app.packageName, rootView, rect) }
+            .combinedClickable(
+                onClick = { launchApp(context, app.packageName, rootView, rect) },
+                onLongClick = { onIconLongPress(app) }
+            )
             .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         AppIconImage(
             app = app,
             sizeDp = 58.dp,
-            iconStyle = iconStyle,
-            shadowsEnabled = shadowsEnabled,
+            cfg = cfg,
             onBounds = { rect = it }
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -235,32 +347,40 @@ fun AppIconCell(
 @Composable
 private fun AppPage(
     pageApps: List<AppEntry>,
-    iconStyle: IconStyle,
-    shadowsEnabled: Boolean,
+    cfg: IconConfig,
     rootView: View,
-    onLongPressHome: () -> Unit
+    onLongPressHome: () -> Unit,
+    onIconLongPress: (AppEntry) -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .pointerInput(Unit) {
-                detectTapGestures(onLongPress = { onLongPressHome() })
-            }
-            .padding(start = 16.dp, end = 16.dp, top = 48.dp, bottom = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp)
-    ) {
-        pageApps.chunked(4).forEach { rowApps ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                rowApps.forEach { app ->
-                    Box(modifier = Modifier.weight(1f)) {
-                        AppIconCell(app, iconStyle, shadowsEnabled, rootView)
-                    }
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Empty-area long press opens launcher settings; icon cells
+        // consume their own long presses (icon context menu).
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(onLongPress = { onLongPressHome() })
                 }
-                repeat(4 - rowApps.size) {
-                    Spacer(modifier = Modifier.weight(1f))
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 16.dp, end = 16.dp, top = 48.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            pageApps.chunked(4).forEach { rowApps ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    rowApps.forEach { app ->
+                        Box(modifier = Modifier.weight(1f)) {
+                            AppIconCell(app, cfg, rootView, onIconLongPress)
+                        }
+                    }
+                    repeat(4 - rowApps.size) {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
                 }
             }
         }
@@ -333,11 +453,13 @@ private fun SearchPill(
 @Composable
 private fun GlassDock(
     dockEntries: List<AppEntry?>,
-    iconStyle: IconStyle,
+    cfg: IconConfig,
     glassEnabled: Boolean,
     tier: PerfTier,
-    shadowsEnabled: Boolean,
     screenHeight: Dp,
+    blurRadiusDp: Float,
+    tintAlpha: Float,
+    tintDarkness: Float,
     rootView: View,
     onEmptySlotClick: () -> Unit
 ) {
@@ -354,7 +476,10 @@ private fun GlassDock(
             tier = tier,
             screenHeight = screenHeight,
             bottomInset = 12.dp,
-            modifier = Modifier.matchParentSize()
+            modifier = Modifier.matchParentSize(),
+            blurRadiusDp = blurRadiusDp,
+            tintAlpha = tintAlpha,
+            tintDarkness = tintDarkness
         )
         Row(
             modifier = Modifier
@@ -369,8 +494,7 @@ private fun GlassDock(
                     AppIconImage(
                         app = entry,
                         sizeDp = 58.dp,
-                        iconStyle = iconStyle,
-                        shadowsEnabled = shadowsEnabled,
+                        cfg = cfg,
                         modifier = Modifier
                             .clip(RoundedCornerShape(14.dp))
                             .clickable {
@@ -416,11 +540,63 @@ fun HomeScreen(
     var hideSettingsInLibrary by remember {
         mutableStateOf(store.hideSettingsInLibrary)
     }
+    var iconShape by remember { mutableStateOf(store.iconShape) }
+    var themeMode by remember { mutableStateOf(store.themeMode) }
+    var dockBlurDp by remember { mutableStateOf(store.dockBlurDp) }
+    var dockTintAlpha by remember { mutableStateOf(store.dockTintAlpha) }
+    var dockTintDark by remember { mutableStateOf(store.dockTintDark) }
+    var customTick by remember { mutableStateOf(0) }
+    var menuApp by remember { mutableStateOf<AppEntry?>(null) }
+    var pendingCustomPkg by remember { mutableStateOf<String?>(null) }
     var showSettings by remember { mutableStateOf(false) }
     var showControlCenter by remember { mutableStateOf(false) }
 
     val apps by produceState<List<AppEntry>>(initialValue = emptyList()) {
         value = withContext(Dispatchers.IO) { loadInstalledApps(context) }
+    }
+
+    // Icon kind classification (drawn pack) for installed + dock apps.
+    val kindByPackage by produceState<Map<String, IconKind>>(
+        initialValue = emptyMap(),
+        apps, dockPackages
+    ) {
+        value = withContext(Dispatchers.IO) {
+            IconMap.buildIconKindMap(
+                context,
+                apps.map { it.packageName } + dockPackages
+            )
+        }
+    }
+
+    val systemDark = isSystemInDarkTheme()
+    val iconDark = when (themeMode) {
+        ThemeMode.SYSTEM -> systemDark
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
+    val shadowsEnabled = perfTier != PerfTier.ENTRY
+    val iconCfg = IconConfig(
+        style = iconStyle,
+        dark = iconDark,
+        shape = iconShape,
+        shadowsEnabled = shadowsEnabled,
+        kindByPackage = kindByPackage,
+        customTick = customTick
+    )
+    val effectiveDockBlur = (if (dockBlurDp >= 0f) dockBlurDp
+        else perfTier.blurRadiusDp).coerceAtMost(blurCapDp(perfTier))
+
+    // System photo picker for custom icons (no storage permission needed).
+    val iconPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        val pkg = pendingCustomPkg
+        pendingCustomPkg = null
+        if (uri != null && pkg != null) {
+            if (CustomIconStore.saveFromUri(context, pkg, uri)) {
+                customTick++
+            }
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -442,8 +618,29 @@ fun HomeScreen(
             dockPackages = dockPackages,
             ccStyle = ccStyle,
             hideSettingsInLibrary = hideSettingsInLibrary,
+            iconConfig = iconCfg,
+            iconShape = iconShape,
+            themeMode = themeMode,
+            dockBlurDp = effectiveDockBlur,
+            dockBlurMax = blurCapDp(perfTier),
+            dockTintAlpha = dockTintAlpha,
+            dockTintDark = dockTintDark,
             dynamicIslandUnlocked = dynamicIslandUnlocked,
             onIconStyleChange = { iconStyle = it; store.iconStyle = it },
+            onIconShapeChange = { iconShape = it; store.iconShape = it },
+            onThemeModeChange = { themeMode = it; store.themeMode = it },
+            onDockBlurChange = { dockBlurDp = it; store.dockBlurDp = it },
+            onDockTintAlphaChange = {
+                dockTintAlpha = it; store.dockTintAlpha = it
+            },
+            onDockTintDarkChange = {
+                dockTintDark = it; store.dockTintDark = it
+            },
+            onResetDockGlass = {
+                dockBlurDp = -1f; store.dockBlurDp = -1f
+                dockTintAlpha = 0.20f; store.dockTintAlpha = 0.20f
+                dockTintDark = 0f; store.dockTintDark = 0f
+            },
             onGlassChange = { glassEnabled = it; store.glassEnabled = it },
             onTierChange = { perfTier = it; store.perfTier = it },
             onDockChange = { updated -> dockPackages = updated; store.dockPackages = updated },
@@ -477,7 +674,6 @@ fun HomeScreen(
         }
     }
 
-    val shadowsEnabled = perfTier != PerfTier.ENTRY
     val appPages = remember(apps) { apps.chunked(APPS_PER_PAGE) }
     val libraryPageIndex = appPages.size
     val pagerState = rememberPagerState(pageCount = { appPages.size + 1 })
@@ -503,18 +699,18 @@ fun HomeScreen(
                 if (page < appPages.size) {
                     AppPage(
                         pageApps = appPages[page],
-                        iconStyle = iconStyle,
-                        shadowsEnabled = shadowsEnabled,
+                        cfg = iconCfg,
                         rootView = rootView,
-                        onLongPressHome = { showSettings = true }
+                        onLongPressHome = { showSettings = true },
+                        onIconLongPress = { menuApp = it }
                     )
                 } else {
                     AppLibraryScreen(
                         apps = libraryApps,
-                        iconStyle = iconStyle,
-                        shadowsEnabled = shadowsEnabled,
+                        cfg = iconCfg,
                         dynamicIslandUnlocked = dynamicIslandUnlocked,
-                        onOpenSettings = { showSettings = true }
+                        onOpenSettings = { showSettings = true },
+                        onIconLongPress = { menuApp = it }
                     )
                 }
             }
@@ -536,11 +732,13 @@ fun HomeScreen(
 
             GlassDock(
                 dockEntries = dockEntries,
-                iconStyle = iconStyle,
+                cfg = iconCfg,
                 glassEnabled = glassEnabled,
                 tier = perfTier,
-                shadowsEnabled = shadowsEnabled,
                 screenHeight = screenHeight,
+                blurRadiusDp = effectiveDockBlur,
+                tintAlpha = dockTintAlpha,
+                tintDarkness = dockTintDark,
                 rootView = rootView,
                 onEmptySlotClick = { showSettings = true }
             )
@@ -574,5 +772,101 @@ fun HomeScreen(
                 onClose = { showControlCenter = false }
             )
         }
+
+        // Icon long-press context menu: custom icon / reset / settings.
+        menuApp?.let { app ->
+            val hasCustom = remember(app.packageName, customTick) {
+                CustomIconStore.has(context, app.packageName)
+            }
+            IconContextMenu(
+                app = app,
+                cfg = iconCfg,
+                hasCustom = hasCustom,
+                onDismiss = { menuApp = null },
+                onChangeIcon = {
+                    pendingCustomPkg = app.packageName
+                    menuApp = null
+                    iconPicker.launch(
+                        ActivityResultContracts.PickVisualMediaRequest(
+                            ActivityResultContracts.PickVisualMedia.ImageOnly
+                        )
+                    )
+                },
+                onResetIcon = {
+                    CustomIconStore.clear(context, app.packageName)
+                    customTick++
+                    menuApp = null
+                },
+                onOpenSettings = {
+                    menuApp = null
+                    showSettings = true
+                }
+            )
+        }
     }
+}
+
+@Composable
+private fun IconContextMenu(
+    app: AppEntry,
+    cfg: IconConfig,
+    hasCustom: Boolean,
+    onDismiss: () -> Unit,
+    onChangeIcon: () -> Unit,
+    onResetIcon: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(24.dp))
+                .background(Color(0xFFF2F2F7))
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            AppIconImage(app = app, sizeDp = 64.dp, cfg = cfg)
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = app.label,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.Black,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            MenuRow("🖼  Ganti ikon dari galeri", onChangeIcon)
+            if (hasCustom) {
+                MenuRow("↩  Reset ke ikon bawaan", onResetIcon)
+            }
+            MenuRow("⚙  Pengaturan launcher", onOpenSettings)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Batal",
+                fontSize = 15.sp,
+                color = Color(0xFF007AFF),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { onDismiss() }
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun MenuRow(label: String, onClick: () -> Unit) {
+    Text(
+        text = label,
+        fontSize = 15.sp,
+        color = Color(0xFF1C1C1E),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White)
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 13.dp)
+    )
+    Spacer(modifier = Modifier.height(8.dp))
 }

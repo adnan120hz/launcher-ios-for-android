@@ -2,8 +2,9 @@ package net.adnan120hz.launcher
 
 import android.content.Context
 
-/** Icon rendering style. Phase 1: only corner radius + shadow differ;
- *  fully redrawn icon packs arrive in Phase 3. */
+/** Icon pack style. Phase 3: selects the hand-drawn pack (iOS 18 flat
+ *  classic vs iOS 26 liquid glass, incl. dark variant) and the corner /
+ *  shadow treatment for framed original icons. */
 enum class IconStyle(val label: String) {
     IOS26("iOS 26"),
     IOS18("iOS 18")
@@ -85,6 +86,53 @@ class LauncherStore(context: Context) {
     fun effectiveCcStyle(): CcStyle =
         if (!glassEnabled) CcStyle.IOS18 else ccStyle
 
+    /** Shape mask for all icons (Phase 3). */
+    var iconShape: IconShapeType
+        get() = runCatching {
+            IconShapeType.valueOf(
+                prefs.getString(KEY_ICON_SHAPE, IconShapeType.SQUIRCLE.name)!!
+            )
+        }.getOrDefault(IconShapeType.SQUIRCLE)
+        set(value) {
+            prefs.edit().putString(KEY_ICON_SHAPE, value.name).apply()
+        }
+
+    /** Light/dark variant of the iOS 26 icon pack (Phase 3). */
+    var themeMode: ThemeMode
+        get() = runCatching {
+            ThemeMode.valueOf(
+                prefs.getString(KEY_THEME_MODE, ThemeMode.SYSTEM.name)!!
+            )
+        }.getOrDefault(ThemeMode.SYSTEM)
+        set(value) {
+            prefs.edit().putString(KEY_THEME_MODE, value.name).apply()
+        }
+
+    /** Manual dock glass tuning (Phase 3). dockBlurDp < 0 means
+     *  "follow the performance tier default". The effective radius is
+     *  always capped per tier so Entry devices stay cheap. */
+    var dockBlurDp: Float
+        get() = prefs.getFloat(KEY_DOCK_BLUR, -1f)
+        set(value) {
+            prefs.edit().putFloat(KEY_DOCK_BLUR, value).apply()
+        }
+
+    var dockTintAlpha: Float
+        get() = prefs.getFloat(KEY_DOCK_TINT_ALPHA, 0.20f)
+        set(value) {
+            prefs.edit().putFloat(KEY_DOCK_TINT_ALPHA, value).apply()
+        }
+
+    var dockTintDark: Float
+        get() = prefs.getFloat(KEY_DOCK_TINT_DARK, 0f)
+        set(value) {
+            prefs.edit().putFloat(KEY_DOCK_TINT_DARK, value).apply()
+        }
+
+    fun effectiveDockBlurDp(): Float =
+        (if (dockBlurDp >= 0f) dockBlurDp else perfTier.blurRadiusDp)
+            .coerceAtMost(blurCapDp(perfTier))
+
     companion object {
         const val PREFS_NAME = "launcher_prefs"
         private const val KEY_ICON_STYLE = "icon_style"
@@ -93,5 +141,19 @@ class LauncherStore(context: Context) {
         private const val KEY_DOCK_PACKAGES = "dock_packages"
         private const val KEY_CC_STYLE = "cc_style"
         private const val KEY_HIDE_SETTINGS_LIB = "hide_settings_in_library"
+        private const val KEY_ICON_SHAPE = "icon_shape"
+        private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_DOCK_BLUR = "dock_blur_dp"
+        private const val KEY_DOCK_TINT_ALPHA = "dock_tint_alpha"
+        private const val KEY_DOCK_TINT_DARK = "dock_tint_dark"
     }
+}
+
+/** Hard cap for the dock blur radius per performance tier: manual
+ *  tuning can refine the glass look but never make an Entry-tier
+ *  device render flagship-cost blur. */
+fun blurCapDp(tier: PerfTier): Float = when (tier) {
+    PerfTier.ENTRY -> 16f
+    PerfTier.MID -> 44f
+    PerfTier.FLAGSHIP -> 64f
 }
