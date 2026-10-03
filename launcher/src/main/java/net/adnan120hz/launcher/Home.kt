@@ -168,7 +168,14 @@ fun AppIconImage(
                 if (onBounds != null) {
                     val p = coords.positionInWindow()
                     val s = coords.size
-                    onBounds(Rect(p.x, p.y, p.x + s.width, p.y + s.height))
+                    onBounds(
+                        Rect(
+                            p.x.toInt(),
+                            p.y.toInt(),
+                            (p.x + s.width).toInt(),
+                            (p.y + s.height).toInt()
+                        )
+                    )
                 }
             }
             .shadow(elevation, shape)
