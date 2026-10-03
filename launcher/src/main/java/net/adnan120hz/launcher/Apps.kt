@@ -9,6 +9,9 @@ import android.graphics.Canvas
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.view.View
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 
 data class AppEntry(
     val label: String,
@@ -65,8 +68,24 @@ fun Drawable.toBitmapSafe(size: Int = 96): Bitmap {
     return bitmap
 }
 
-/** Launch an app with an iOS-style scale-up animation from the tapped
- *  icon's window bounds when they are known. */
+/**
+ * Phase 5 outgoing-launch state. Written by [launchApp] the moment an
+ * app actually starts; read by the home surface, which progressively
+ * blurs (iOS 26 fluid style) and spring-squashes the tapped icon while
+ * the new window flies open. Cleared when the launcher resumes (the
+ * "close" flight back home) or when an in-app layer takes over, so the
+ * blur always washes back out — never gets stuck on.
+ */
+object OutgoingLaunch {
+    var activePackage: String? by mutableStateOf(null)
+}
+
+/** Launch an app iOS-style, following the user's animation style:
+ *  - iOS 18: classic scale-up from the tapped icon's window bounds.
+ *  - iOS 26 fluid: the same icon-to-window flight; the launcher side
+ *    adds spring physics + a progressive GPU blur of the home surface
+ *    (see [OutgoingLaunch] / HomeScreen). Without known icon bounds it
+ *    falls back to a gentle cross-fade instead of the jarring cut. */
 fun launchApp(
     context: Context,
     packageName: String,
@@ -75,17 +94,35 @@ fun launchApp(
 ) {
     val launch = context.packageManager.getLaunchIntentForPackage(packageName) ?: return
     launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    if (sourceView != null && sourceRect != null && sourceRect.width() > 0) {
-        val options = ActivityOptions.makeScaleUpAnimation(
-            sourceView,
-            sourceRect.left,
-            sourceRect.top,
-            sourceRect.width(),
-            sourceRect.height()
-        )
-        context.startActivity(launch, options.toBundle())
-    } else {
-        context.startActivity(launch)
+    val style = LauncherStore(context).animStyle
+    // Mark the outgoing launch only now that we know the app exists.
+    OutgoingLaunch.activePackage = packageName
+    val options = when {
+        sourceView != null && sourceRect != null && sourceRect.width() > 0 ->
+            ActivityOptions.makeScaleUpAnimation(
+                sourceView,
+                sourceRect.left,
+                sourceRect.top,
+                sourceRect.width(),
+                sourceRect.height()
+            )
+        style == AnimStyle.IOS26 ->
+            ActivityOptions.makeCustomAnimation(
+                context,
+                android.R.anim.fade_in,
+                android.R.anim.fade_out
+            )
+        else -> null
+    }
+    try {
+        if (options != null) {
+            context.startActivity(launch, options.toBundle())
+        } else {
+            context.startActivity(launch)
+        }
+    } catch (e: Exception) {
+        // Launch died after all — don't leave the home surface blurred.
+        OutgoingLaunch.activePackage = null
     }
 }
 

@@ -71,6 +71,15 @@ fun SettingsScreen(
     onCcStyleChange: (CcStyle) -> Unit,
     onHideSettingsChange: (Boolean) -> Unit,
     onDynamicIslandUnlock: () -> Unit,
+    animStyle: AnimStyle,
+    onAnimStyleChange: (AnimStyle) -> Unit,
+    updateVersion: String?,
+    updateReleaseUrl: String,
+    appVersion: String,
+    updateChecksEnabled: Boolean,
+    lastUpdateCheckMs: Long,
+    onUpdateChecksChange: (Boolean) -> Unit,
+    onCheckUpdatesNow: () -> Unit,
     lockEnabled: Boolean,
     lockPrefs: LockPrefs,
     lockGlassStyleIs26: Boolean,
@@ -114,6 +123,15 @@ fun SettingsScreen(
                 fontWeight = FontWeight.Bold,
                 color = Color.Black
             )
+            if (updateVersion != null) {
+                Spacer(modifier = Modifier.size(8.dp))
+                Box(
+                    modifier = Modifier
+                        .size(9.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color(0xFFFF3B30))
+                )
+            }
         }
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -153,6 +171,43 @@ fun SettingsScreen(
             }
         } else {
             LazyColumn(modifier = Modifier.weight(1f)) {
+                if (updateVersion != null) {
+                    item {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color(0xFF007AFF))
+                                .clickable {
+                                    context.startActivity(
+                                        Intent(
+                                            Intent.ACTION_VIEW,
+                                            Uri.parse(updateReleaseUrl)
+                                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }
+                                .padding(horizontal = 14.dp, vertical = 13.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(9.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(Color.White)
+                            )
+                            Spacer(modifier = Modifier.size(10.dp))
+                            Text(
+                                text = "Versi $updateVersion tersedia — " +
+                                    "ketuk untuk memperbarui",
+                                fontSize = 14.sp,
+                                color = Color.White,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(text = "›", fontSize = 18.sp, color = Color.White)
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+                }
                 item {
                     SectionTitle("Gaya Ikon")
                     IconStyle.entries.forEach { style ->
@@ -217,6 +272,21 @@ fun SettingsScreen(
                     }
                     Text(
                         text = "Mati = gaya solid ala iOS 18, lebih hemat baterai.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    SectionTitle("Gaya Animasi Aplikasi")
+                    AnimStyle.entries.forEach { style ->
+                        RadioRow(
+                            label = style.label,
+                            selected = animStyle == style,
+                            onClick = { onAnimStyleChange(style) }
+                        )
+                    }
+                    Text(
+                        text = "iOS 18 = zoom klasik ikon jadi jendela. iOS 26 (fluid) = zoom yang sama tapi digerakkan fisika pegas, ikon yang ditekan memantul halus, dan home screen nge-blur progresif di belakang aplikasi yang membuka (blur GPU asli di Android 12+; Android 10–11 cukup fade halus). Radius blur ngikutin tier Performa biar frame tetap mulus — kelancaran selalu didahulukan daripada efek.",
                         fontSize = 12.sp,
                         color = Color(0xFF6E6E73)
                     )
@@ -493,6 +563,56 @@ fun SettingsScreen(
                         onLockPrefsChange = onLockPrefsChange,
                         onLockNow = onLockNow
                     )
+                }
+                item {
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    SectionTitle("Pembaruan Aplikasi")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Cek versi terbaru otomatis",
+                            fontSize = 15.sp,
+                            color = Color.Black,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = updateChecksEnabled,
+                            onCheckedChange = { onUpdateChecksChange(it) }
+                        )
+                    }
+                    Text(
+                        text = "Paling sering sekali sehari saat launcher dibuka, diam-diam ngecek rilis terbaru di GitHub. Kalau ada versi lebih baru, muncul baner + titik penanda di Pengaturan ini. Tanpa iklan, tanpa pelacakan.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Versi terpasang: $appVersion" +
+                            if (updateVersion != null)
+                                " — versi $updateVersion sudah tersedia di atas"
+                            else "",
+                        fontSize = 13.sp,
+                        color = Color.Black
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (lastUpdateCheckMs > 0L)
+                            "Terakhir dicek: " + java.text.SimpleDateFormat(
+                                "dd MMM yyyy, HH:mm",
+                                java.util.Locale.getDefault()
+                            ).format(java.util.Date(lastUpdateCheckMs))
+                        else
+                            "Terakhir dicek: belum pernah",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(onClick = { onCheckUpdatesNow() }) {
+                        Text("Cek sekarang")
+                    }
                 }
                 item {
                     Spacer(modifier = Modifier.height(12.dp))

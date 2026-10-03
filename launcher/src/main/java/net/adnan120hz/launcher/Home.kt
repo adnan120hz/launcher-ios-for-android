@@ -14,6 +14,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -48,6 +52,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -63,6 +69,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -316,10 +323,24 @@ fun AppIconCell(
     app: AppEntry,
     cfg: IconConfig,
     rootView: View,
+    animStyle: AnimStyle,
     onIconLongPress: (AppEntry) -> Unit
 ) {
     val context = LocalContext.current
     var rect by remember { mutableStateOf<Rect?>(null) }
+    // Phase 5 (iOS 26 fluid): the tapped icon spring-squashes while its
+    // app flies open — physics, never a stiff linear shrink — and
+    // springs back when the user returns home. iOS 18 stays crisp.
+    val isOutgoing = animStyle == AnimStyle.IOS26 &&
+        OutgoingLaunch.activePackage == app.packageName
+    val pressScale by animateFloatAsState(
+        targetValue = if (isOutgoing) 0.86f else 1f,
+        animationSpec = spring(
+            dampingRatio = 0.42f,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "iconPress"
+    )
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -335,6 +356,10 @@ fun AppIconCell(
             app = app,
             sizeDp = 58.dp,
             cfg = cfg,
+            modifier = Modifier.graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            },
             onBounds = { rect = it }
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -361,6 +386,7 @@ private fun AppPage(
     pageApps: List<AppEntry>,
     cfg: IconConfig,
     rootView: View,
+    animStyle: AnimStyle,
     onLongPressHome: () -> Unit,
     onIconLongPress: (AppEntry) -> Unit
 ) {
@@ -387,7 +413,7 @@ private fun AppPage(
                 ) {
                     rowApps.forEach { app ->
                         Box(modifier = Modifier.weight(1f)) {
-                            AppIconCell(app, cfg, rootView, onIconLongPress)
+                            AppIconCell(app, cfg, rootView, animStyle, onIconLongPress)
                         }
                     }
                     repeat(4 - rowApps.size) {
@@ -549,6 +575,7 @@ fun HomeScreen(
     var perfTier by remember { mutableStateOf(store.perfTier) }
     var dockPackages by remember { mutableStateOf(store.dockPackages) }
     var ccStyle by remember { mutableStateOf(store.ccStyle) }
+    var animStyle by remember { mutableStateOf(store.animStyle) }
     var hideSettingsInLibrary by remember {
         mutableStateOf(store.hideSettingsInLibrary)
     }
@@ -629,14 +656,18 @@ fun HomeScreen(
             IntentFilter(Intent.ACTION_SCREEN_OFF)
         )
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME &&
-                LockScreenRuntime.screenOffPending
-            ) {
-                LockScreenRuntime.screenOffPending = false
-                // The service (when running) shows the overlay itself.
-                if (lockEnabled && !LockScreenRuntime.serviceRunning) {
-                    showLockInApp = true
-                    lockFallbackVisible = false
+            if (event == Lifecycle.Event.ON_RESUME) {
+                // Phase 5: coming back home = the "close" flight; end
+                // the outgoing-launch blur/spring state so the home
+                // surface washes back to sharp.
+                OutgoingLaunch.activePackage = null
+                if (LockScreenRuntime.screenOffPending) {
+                    LockScreenRuntime.screenOffPending = false
+                    // The service (when running) shows the overlay itself.
+                    if (lockEnabled && !LockScreenRuntime.serviceRunning) {
+                        showLockInApp = true
+                        lockFallbackVisible = false
+                    }
                 }
             }
         }
@@ -660,6 +691,14 @@ fun HomeScreen(
         }
     }
 
+    // Phase 5: opening any in-app layer also ends an outgoing-launch
+    // wash (it normally ends on ON_RESUME after the app flight).
+    LaunchedEffect(showSettings, showLockInApp) {
+        if (showSettings || showLockInApp) {
+            OutgoingLaunch.activePackage = null
+        }
+    }
+
     // Bring the lock service back when the launcher opens with the
     // feature switched on (e.g. after the process was killed).
     LaunchedEffect(Unit) {
@@ -672,6 +711,53 @@ fun HomeScreen(
                 // Platform refused the start; in-app layer still works.
             }
         }
+    }
+
+    // ---- Phase 5: update availability --------------------------------
+    // Quiet check of this repo's latest GitHub release: at most once a
+    // day when the launcher opens (plus manual checks from Settings).
+    // A newer version only surfaces as a banner + red dot — no spam,
+    // no ads, no tracking. Cached result renders immediately.
+    var availableUpdate by remember { mutableStateOf(store.availableVersion) }
+    var availableReleaseUrl by remember {
+        mutableStateOf(store.availableReleaseUrl)
+    }
+    var updateChecksEnabled by remember {
+        mutableStateOf(store.updateChecksEnabled)
+    }
+    var lastUpdateCheckMs by remember {
+        mutableLongStateOf(store.lastUpdateCheckMs)
+    }
+    var manualCheckTick by remember { mutableIntStateOf(0) }
+    val appVersion = remember { UpdateChecker.currentVersionName(context) }
+
+    suspend fun runUpdateCheck(manual: Boolean) {
+        if (!manual && !store.updateChecksEnabled) return
+        val nowMs = System.currentTimeMillis()
+        if (!manual &&
+            nowMs - store.lastUpdateCheckMs < UpdateChecker.CHECK_INTERVAL_MS
+        ) {
+            return
+        }
+        val info = withContext(Dispatchers.IO) { UpdateChecker.fetchLatest() }
+        store.lastUpdateCheckMs = System.currentTimeMillis()
+        lastUpdateCheckMs = store.lastUpdateCheckMs
+        if (info != null) {
+            if (UpdateChecker.isNewer(info.versionName, appVersion)) {
+                store.availableVersion = info.versionName
+                store.availableReleaseUrl = info.htmlUrl
+                availableUpdate = info.versionName
+                availableReleaseUrl = info.htmlUrl
+            } else {
+                store.availableVersion = null
+                availableUpdate = null
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { runUpdateCheck(manual = false) }
+    LaunchedEffect(manualCheckTick) {
+        if (manualCheckTick > 0) runUpdateCheck(manual = true)
     }
 
     val apps by produceState<List<AppEntry>>(initialValue = emptyList()) {
@@ -800,6 +886,19 @@ fun HomeScreen(
             },
             onGlassChange = { glassEnabled = it; store.glassEnabled = it },
             onTierChange = { perfTier = it; store.perfTier = it },
+            animStyle = animStyle,
+            onAnimStyleChange = { animStyle = it; store.animStyle = it },
+            updateVersion = if (updateChecksEnabled) availableUpdate else null,
+            updateReleaseUrl = availableReleaseUrl,
+            appVersion = appVersion,
+            updateChecksEnabled = updateChecksEnabled,
+            lastUpdateCheckMs = lastUpdateCheckMs,
+            onUpdateChecksChange = { enabled ->
+                updateChecksEnabled = enabled
+                store.updateChecksEnabled = enabled
+                if (enabled) manualCheckTick++
+            },
+            onCheckUpdatesNow = { manualCheckTick++ },
             onDockChange = { updated -> dockPackages = updated; store.dockPackages = updated },
             onResetDock = {
                 val defaults = resolveDefaultDock(context)
@@ -872,8 +971,39 @@ fun HomeScreen(
         (entries + List(4) { null }).take(4)
     }
 
+    // ---- Phase 5: outgoing-launch progress ---------------------------
+    // 0 = home at rest, 1 = the launched app has fully flown open.
+    // In the iOS 26 fluid style the whole home surface (wallpaper +
+    // icons) progressively blurs behind the opening window, like the
+    // reference: driven by a spring so the wash eases in with physics
+    // instead of a stiff linear ramp, and washed back out on return.
+    // iOS 18 keeps the classic crisp zoom — no blur, short tween.
+    // Blur is a real GPU RenderEffect (Modifier.blur, API 31+); below
+    // that the layer only fades slightly. Radius is tier-scaled (and
+    // capped per tier) so smooth frames always outrank the effect.
+    val fluidActive = animStyle == AnimStyle.IOS26 &&
+        OutgoingLaunch.activePackage != null
+    val launchProgress by animateFloatAsState(
+        targetValue = if (fluidActive) 1f else 0f,
+        animationSpec = if (fluidActive) {
+            spring(
+                dampingRatio = 0.85f,
+                stiffness = Spring.StiffnessMediumLow
+            )
+        } else {
+            tween(durationMillis = 220)
+        },
+        label = "launchProgress"
+    )
+
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val screenHeight = maxHeight
+        Box(
+            Modifier
+                .matchParentSize()
+                .blur((launchProgress * launchBlurRadiusDp(perfTier)).dp)
+                .graphicsLayer { alpha = 1f - launchProgress * 0.10f }
+        ) {
         WallpaperBackground(Modifier.fillMaxSize())
         Column(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(
@@ -887,6 +1017,7 @@ fun HomeScreen(
                         pageApps = appPages[page],
                         cfg = iconCfg,
                         rootView = rootView,
+                        animStyle = animStyle,
                         onLongPressHome = { showSettings = true },
                         onIconLongPress = { menuApp = it }
                     )
@@ -895,6 +1026,7 @@ fun HomeScreen(
                         apps = libraryApps,
                         cfg = iconCfg,
                         dynamicIslandUnlocked = dynamicIslandUnlocked,
+                        updateAvailable = availableUpdate != null,
                         onOpenSettings = { showSettings = true },
                         onIconLongPress = { menuApp = it }
                     )
@@ -928,6 +1060,7 @@ fun HomeScreen(
                 rootView = rootView,
                 onEmptySlotClick = { showSettings = true }
             )
+        }
         }
 
         // Top-edge swipe opens the Control Center overlay.

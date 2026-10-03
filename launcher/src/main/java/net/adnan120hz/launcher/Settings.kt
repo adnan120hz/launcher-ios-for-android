@@ -25,6 +25,16 @@ enum class CcStyle(val label: String) {
     IOS18("iOS 18 (klasik)")
 }
 
+/** App open/close animation style (Phase 5). iOS 18 = the classic
+ *  icon-to-window zoom. iOS 26 (fluid) = the same window flight driven
+ *  with spring physics on the launcher side plus a progressive GPU
+ *  blur of the home surface while the app opens. Motion smoothness
+ *  always wins over effect cost: blur radius scales with the tier. */
+enum class AnimStyle(val label: String) {
+    IOS18("iOS 18 (klasik)"),
+    IOS26("iOS 26 (fluid)")
+}
+
 /** Persistent launcher settings, stored in the same prefs file the
  *  Phase 0 onboarding already uses (its keys stay untouched). */
 class LauncherStore(context: Context) {
@@ -169,6 +179,52 @@ class LauncherStore(context: Context) {
     fun lockGlassStyleIs26(): Boolean =
         effectiveCcStyle() == CcStyle.IOS26
 
+    /** App open/close animation style (Phase 5). */
+    var animStyle: AnimStyle
+        get() = runCatching {
+            AnimStyle.valueOf(
+                prefs.getString(KEY_ANIM_STYLE, AnimStyle.IOS26.name)!!
+            )
+        }.getOrDefault(AnimStyle.IOS26)
+        set(value) {
+            prefs.edit().putString(KEY_ANIM_STYLE, value.name).apply()
+        }
+
+    /** Update availability checks (Phase 5): a quiet once-a-day look at
+     *  this repo's latest GitHub release. No ads, no tracking — the only
+     *  thing ever fetched is the release tag + page URL. */
+    var updateChecksEnabled: Boolean
+        get() = prefs.getBoolean(KEY_UPDATE_CHECKS, true)
+        set(value) {
+            prefs.edit().putBoolean(KEY_UPDATE_CHECKS, value).apply()
+        }
+
+    /** Epoch millis of the last update check (0 = never). */
+    var lastUpdateCheckMs: Long
+        get() = prefs.getLong(KEY_LAST_UPDATE_CHECK, 0L)
+        set(value) {
+            prefs.edit().putLong(KEY_LAST_UPDATE_CHECK, value).apply()
+        }
+
+    /** Newest release version seen that is newer than the installed
+     *  build, or null when up to date / never checked. Drives the
+     *  settings banner + red dot. */
+    var availableVersion: String?
+        get() = prefs.getString(KEY_AVAILABLE_VERSION, null)
+            ?.takeIf { it.isNotBlank() }
+        set(value) {
+            prefs.edit().putString(KEY_AVAILABLE_VERSION, value).apply()
+        }
+
+    /** Release page to open when the update banner is tapped. */
+    var availableReleaseUrl: String
+        get() = prefs.getString(KEY_AVAILABLE_URL, null)
+            ?.takeIf { it.isNotBlank() }
+            ?: UpdateChecker.RELEASES_PAGE
+        set(value) {
+            prefs.edit().putString(KEY_AVAILABLE_URL, value).apply()
+        }
+
     companion object {
         const val PREFS_NAME = "launcher_prefs"
         private const val KEY_ICON_STYLE = "icon_style"
@@ -190,6 +246,11 @@ class LauncherStore(context: Context) {
         private const val KEY_LOCK_WALLPAPER_BLUR = "lock_wallpaper_blur"
         private const val KEY_LOCK_GLASS_INTENSITY = "lock_glass_intensity"
         private const val KEY_LOCK_USE_BIOMETRIC = "lock_use_biometric"
+        private const val KEY_ANIM_STYLE = "anim_style"
+        private const val KEY_UPDATE_CHECKS = "update_checks_enabled"
+        private const val KEY_LAST_UPDATE_CHECK = "last_update_check_ms"
+        private const val KEY_AVAILABLE_VERSION = "available_version"
+        private const val KEY_AVAILABLE_URL = "available_release_url"
     }
 }
 
@@ -201,3 +262,15 @@ fun blurCapDp(tier: PerfTier): Float = when (tier) {
     PerfTier.MID -> 44f
     PerfTier.FLAGSHIP -> 64f
 }
+
+/** Blur radius of the progressive home wash while an app flies open
+ *  (Phase 5, iOS 26 fluid style). Smooth frames outrank effects, so
+ *  the radius scales down hard on weaker tiers and always respects the
+ *  same per-tier cap as the dock glass. Entry devices additionally
+ *  shrink the blur layer resolution (see HomeScreen) so the GPU never
+ *  pays flagship prices for the transition. */
+fun launchBlurRadiusDp(tier: PerfTier): Float = when (tier) {
+    PerfTier.ENTRY -> 8f
+    PerfTier.MID -> 22f
+    PerfTier.FLAGSHIP -> 40f
+}.coerceAtMost(blurCapDp(tier))

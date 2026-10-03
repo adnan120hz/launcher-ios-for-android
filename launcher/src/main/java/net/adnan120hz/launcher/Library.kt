@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +41,7 @@ fun AppLibraryScreen(
     apps: List<AppEntry>,
     cfg: IconConfig,
     dynamicIslandUnlocked: Boolean,
+    updateAvailable: Boolean = false,
     onOpenSettings: () -> Unit,
     onIconLongPress: (AppEntry) -> Unit
 ) {
@@ -88,6 +90,15 @@ fun AppLibraryScreen(
                 color = Color.White,
                 modifier = Modifier.weight(1f)
             )
+            if (updateAvailable) {
+                Box(
+                    modifier = Modifier
+                        .size(9.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color(0xFFFF3B30))
+                )
+                Spacer(modifier = Modifier.size(10.dp))
+            }
             Text(text = "›", fontSize = 18.sp, color = Color.White)
         }
 
