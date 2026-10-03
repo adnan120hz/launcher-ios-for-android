@@ -751,7 +751,7 @@ private fun CameraScreenContent() {
             if (activeGrade != null && Build.VERSION.SDK_INT >= 31) {
                 Modifier.fillMaxSize().graphicsLayer {
                     renderEffect = android.graphics.RenderEffect.createColorFilterEffect(
-                        android.graphics.ColorFilter(
+                        android.graphics.ColorMatrixColorFilter(
                             android.graphics.ColorMatrix(activeGrade.matrix)
                         )
                     ).asComposeRenderEffect()
