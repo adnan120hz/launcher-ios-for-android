@@ -405,6 +405,7 @@ fun SettingsScreen(
                     }
                     SettingsCard(glassEnabled) {
                     SectionTitle("Aplikasi Dock")
+                    }
                 }
                 items(4) { slotIndex ->
                     SettingsCard(glassEnabled) {
@@ -777,6 +778,7 @@ fun SettingsScreen(
                 }
             }
         }
+    }
     }
 }
 

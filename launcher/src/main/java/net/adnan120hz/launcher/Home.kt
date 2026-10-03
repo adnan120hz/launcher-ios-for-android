@@ -285,7 +285,7 @@ fun AppIconImage(
             else -> {
                 if (originalBitmap != null) {
                     Image(
-                        bitmap = originalBitmap,
+                        bitmap = originalBitmap.asImageBitmap(),
                         contentDescription = app.label,
                         modifier = Modifier.matchParentSize()
                     )

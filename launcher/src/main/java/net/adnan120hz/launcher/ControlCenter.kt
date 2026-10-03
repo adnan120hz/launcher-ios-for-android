@@ -625,11 +625,13 @@ private fun CcMiddleRow(glass: Boolean) {
                 active = dndOn,
                 onClick = {
                     if (dndAccess) {
-                        nm.interruptionFilter = if (dndOn) {
-                            NotificationManager.INTERRUPTION_FILTER_ALL
-                        } else {
-                            NotificationManager.INTERRUPTION_FILTER_PRIORITY
-                        }
+                        nm.setInterruptionFilter(
+                            if (dndOn) {
+                                NotificationManager.INTERRUPTION_FILTER_ALL
+                            } else {
+                                NotificationManager.INTERRUPTION_FILTER_PRIORITY
+                            }
+                        )
                         tick++
                     } else {
                         context.startActivity(
