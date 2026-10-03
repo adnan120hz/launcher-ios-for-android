@@ -266,9 +266,8 @@ fun blurCapDp(tier: PerfTier): Float = when (tier) {
 /** Blur radius of the progressive home wash while an app flies open
  *  (Phase 5, iOS 26 fluid style). Smooth frames outrank effects, so
  *  the radius scales down hard on weaker tiers and always respects the
- *  same per-tier cap as the dock glass. Entry devices additionally
- *  shrink the blur layer resolution (see HomeScreen) so the GPU never
- *  pays flagship prices for the transition. */
+ *  same per-tier cap as the dock glass: Entry devices never pay for a
+ *  flagship-size blur kernel during the transition. */
 fun launchBlurRadiusDp(tier: PerfTier): Float = when (tier) {
     PerfTier.ENTRY -> 8f
     PerfTier.MID -> 22f
