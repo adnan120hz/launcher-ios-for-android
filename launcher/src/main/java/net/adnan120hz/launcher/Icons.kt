@@ -46,7 +46,41 @@ data class IconConfig(
     val shape: IconShapeType,
     val shadowsEnabled: Boolean,
     val kindByPackage: Map<String, IconKind>,
-    val customTick: Int
+    val customTick: Int,
+    // 0.8.0 iOS 26 icon appearance modes (Default/Dark/Clear/Tinted).
+    // Only meaningful with the iOS 26 style; iOS 18 renders classic full
+    // colour regardless (its Dark variant still follows `dark`).
+    val variant: IconVariant = IconVariant.LIGHT,
+    val tintArgb: Int = 0xFF0A84FF.toInt()
+) {
+    /** The variant the renderer should actually paint: LIGHT follows the
+     *  `dark` flag (legacy iOS 26 default behaviour), DARK forces the
+     *  dark pack, CLEAR/TINTED only exist in the iOS 26 family. */
+    fun effectiveVariant(): IconVariant = when (variant) {
+        IconVariant.LIGHT -> variant
+        IconVariant.DARK -> IconVariant.DARK
+        IconVariant.CLEAR, IconVariant.TINTED ->
+            if (style == IconStyle.IOS26) variant else IconVariant.LIGHT
+    }
+}
+
+/** iOS 26 home-screen icon appearance (iOS 26 "Icon Styles"):
+ *  LIGHT = full colour (Default), DARK = dark pack, CLEAR = translucent
+ *  clear-glass plate with a light monochrome glyph, TINTED = glyphs in
+ *  one user-picked tint over a dark plate. The user picks the tint from
+ *  the swatch row in Settings. */
+enum class IconVariant(val label: String) {
+    LIGHT("Terang"),
+    DARK("Gelap"),
+    CLEAR("Clear"),
+    TINTED("Tinted")
+}
+
+/** iOS-style tint swatches for the TINTED variant. */
+val ICON_TINT_SWATCHES: List<Int> = listOf(
+    0xFF0A84FF.toInt(), 0xFF30D158.toInt(), 0xFFFFD60A.toInt(),
+    0xFFFF9F0A.toInt(), 0xFFFF375F.toInt(), 0xFFBF5AF2.toInt(),
+    0xFF64D2FF.toInt(), 0xFFFFFFFF.toInt()
 )
 
 /**

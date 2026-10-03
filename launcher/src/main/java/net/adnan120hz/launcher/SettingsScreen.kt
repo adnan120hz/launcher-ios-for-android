@@ -62,6 +62,10 @@ fun SettingsScreen(
     onIconStyleChange: (IconStyle) -> Unit,
     onIconShapeChange: (IconShapeType) -> Unit,
     onThemeModeChange: (ThemeMode) -> Unit,
+    iconVariant: IconVariant = IconVariant.LIGHT,
+    iconTintArgb: Int = 0xFF0A84FF.toInt(),
+    onIconVariantChange: (IconVariant) -> Unit = {},
+    onIconTintChange: (Int) -> Unit = {},
     onDockBlurChange: (Float) -> Unit,
     onDockTintAlphaChange: (Float) -> Unit,
     onDockTintDarkChange: (Float) -> Unit,
@@ -157,8 +161,38 @@ fun SettingsScreen(
         }
         Spacer(modifier = Modifier.height(16.dp))
 
+        // 0.8.0: the Dynamic Island gets its own page now (it was buried in
+        // this card before); the main list only carries the doorway row.
+        var showIslandPage by remember { mutableStateOf(false) }
+
         val slot = pickerSlot
-        if (slot != null) {
+        if (showIslandPage) {
+            DynamicIslandScreen(
+                unlocked = dynamicIslandUnlocked,
+                onUnlock = onDynamicIslandUnlock,
+                islandEnabled = remember(permTick) {
+                    LauncherStore(context).islandEnabled
+                },
+                onIslandEnabledChange = { enabled ->
+                    val s = LauncherStore(context)
+                    s.islandEnabled = enabled
+                    if (enabled) {
+                        IslandService.start(context)
+                    } else {
+                        IslandService.stop(context)
+                    }
+                    permTick++
+                },
+                islandScale = islandScale,
+                islandWidthFactor = islandWidthFactor,
+                islandOffsetXDp = islandOffsetXDp,
+                islandOffsetYDp = islandOffsetYDp,
+                onIslandGeometryChange = onIslandGeometryChange,
+                onResetIslandGeometry = onResetIslandGeometry,
+                glassEnabled = glassEnabled,
+                onBack = { showIslandPage = false }
+            )
+        } else if (slot != null) {
             Text(
                 text = "Ketuk aplikasi buat mengisi Slot ${slot + 1}:",
                 fontSize = 13.sp,
@@ -274,7 +308,50 @@ fun SettingsScreen(
 
                     }
                     SettingsCard(glassEnabled) {
-                    SectionTitle("Varian Gelap (pack iOS 26)")
+                    SectionTitle("Penampilan Ikon (iOS 26)")
+                    IconVariant.entries.forEach { variant ->
+                        RadioRow(
+                            label = variant.label,
+                            selected = iconVariant == variant,
+                            onClick = { onIconVariantChange(variant) }
+                        )
+                    }
+                    if (iconVariant == IconVariant.TINTED) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Warna tint:",
+                            fontSize = 13.sp,
+                            color = Color.Black
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row {
+                            ICON_TINT_SWATCHES.forEach { argb ->
+                                Box(
+                                    modifier = Modifier
+                                        .padding(end = 8.dp)
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(Color(argb))
+                                        .border(
+                                            if (iconTintArgb == argb) 2.5.dp
+                                            else 1.dp,
+                                            if (iconTintArgb == argb)
+                                                Color(0xFF0A84FF)
+                                            else Color.White.copy(alpha = 0.5f),
+                                            RoundedCornerShape(50)
+                                        )
+                                        .clickable { onIconTintChange(argb) }
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    Text(
+                        text = "Empat penampilan ikon iOS 26 persis seperti iPhone: Terang (warna penuh), Gelap (pack gelap), Clear (kaca bening mono), Tinted (satu warna tint pilihanmu). Berlaku untuk ikon pack gambar ulang DAN ikon aplikasi asli; ikon custom dari gambarmu tetap berwarna penuh. \"Ikuti sistem\" di bawah tetap mengatur varian gelap otomatis untuk mode Terang.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
                     ThemeMode.entries.forEach { mode ->
                         RadioRow(
                             label = mode.label,
@@ -348,7 +425,9 @@ fun SettingsScreen(
                         iconShape = iconShape,
                         blurDp = dockBlurDp,
                         tintAlpha = dockTintAlpha,
-                        tintDark = dockTintDark
+                        tintDark = dockTintDark,
+                        iconVariant = iconVariant,
+                        iconTintArgb = iconTintArgb
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     SliderRow(
@@ -497,221 +576,43 @@ fun SettingsScreen(
                     Text(
                         text = "Cuma menyembunyikan ikon Settings bawaan HP dari daftar App Library (saat Control Center launcher dipakai). Aplikasi Settings-nya sendiri tidak diutak-atik.",
                         fontSize = 12.sp,
-                        color = Color(0xFF6E6E73)
-                    )
-                    }
-                    Spacer(modifier = Modifier.height(20.dp))
-
                     SettingsCard(glassEnabled) {
                     SectionTitle("Dynamic Island")
-                    if (!dynamicIslandUnlocked) {
-                        Text(
-                            text = "🔒 Terkunci — fitur khusus Dynamic Island iOS 26 UI.",
-                            fontSize = 15.sp,
-                            color = Color.Black
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedButton(onClick = {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse(TIKTOK_URL))
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { showIslandPage = true }
+                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Dynamic Island",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.Black
                             )
-                        }) {
-                            Text("Buka TikTok & Follow")
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedButton(onClick = { onDynamicIslandUnlock() }) {
-                            Text("Saya sudah follow — buka fitur")
-                        }
-                        Text(
-                            text = "Follow tidak bisa diverifikasi otomatis; ini konfirmasi mandiri (sistem kepercayaan), sama seperti onboarding.",
-                            fontSize = 12.sp,
-                            color = Color(0xFF6E6E73)
-                        )
-                    } else {
-                        Text(
-                            text = "Izin tampil di atas aplikasi lain (overlay): " +
-                                if (overlayGranted) "sudah diberikan ✓"
-                                else "belum diberikan",
-                            fontSize = 14.sp,
-                            color = Color.Black
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        if (!overlayGranted) {
-                            OutlinedButton(onClick = {
-                                context.startActivity(
-                                    Intent(
-                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                        Uri.parse("package:${context.packageName}")
-                                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                )
-                            }) {
-                                Text("Izinkan overlay")
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                        }
-                        Text(
-                            text = "Status Dynamic Island: " +
-                                if (islandRunning) "aktif" else "mati",
-                            fontSize = 14.sp,
-                            color = Color.Black
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row {
-                            OutlinedButton(onClick = {
-                                if (overlayGranted) {
-                                    context.startService(
-                                        Intent(context, IslandService::class.java)
-                                    )
-                                } else {
-                                    context.startActivity(
-                                        Intent(
-                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                            Uri.parse("package:${context.packageName}")
-                                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    )
-                                }
-                                permTick++
-                            }) {
-                                Text("Aktifkan Island")
-                            }
-                            Spacer(modifier = Modifier.padding(horizontal = 6.dp))
-                            OutlinedButton(onClick = {
-                                context.stopService(
-                                    Intent(context, IslandService::class.java)
-                                )
-                                permTick++
-                            }) {
-                                Text("Matikan Island")
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedButton(onClick = {
-                            context.startService(
-                                Intent(context, IslandService::class.java)
-                                    .setAction(IslandService.ACTION_TIMER)
+                            Text(
+                                text = when {
+                                    !dynamicIslandUnlocked ->
+                                        "Terkunci — fitur khusus, buka halamannya"
+                                    !islandRunning ->
+                                        "Mati — ketuk untuk halaman island"
+                                    else -> "Aktif — ketuk untuk atur & tes"
+                                },
+                                fontSize = 12.sp,
+                                color = Color(0xFF6E6E73)
                             )
-                            permTick++
-                        }) {
-                            Text("Tes timer 1 menit di Island")
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedButton(onClick = { permTick++ }) {
-                            Text("Segarkan status izin")
                         }
                         Text(
-                            text = "Island menampilkan DATA NYATA saja: jam, charging + persen baterai asli, timer berjalan, dan lagu yang diputar (judul + artis + play/pause — ketuk pill-nya). Kalau izin akses notifikasi belum diberikan, state musik tidak ditampilkan sama sekali (tidak ada state palsu).",
-                            fontSize = 12.sp,
-                            color = Color(0xFF6E6E73)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Atur Dynamic Island (berlaku langsung saat digeser):",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.Black
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        // Live preview of the pill at the chosen geometry.
-                        Box(
-                            modifier = Modifier.fillMaxWidth(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(
-                                        width = (150.dp * islandWidthFactor * islandScale)
-                                            .coerceAtMost(330.dp),
-                                        height = (37.dp * islandScale)
-                                            .coerceAtMost(56.dp)
-                                    )
-                                    .offset(x = (islandOffsetXDp * 0.25f).dp)
-                                    .clip(RoundedCornerShape(50))
-                                    .background(Color.Black),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "21:41",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color.White
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(10.dp))
-                        SliderRow(
-                            label = "Ukuran island",
-                            valueText = "${(islandScale * 100).toInt()}%",
-                            value = islandScale,
-                            valueRange = 0.8f..1.3f,
-                            enabled = true,
-                            onValueChange = {
-                                onIslandGeometryChange(
-                                    it, islandWidthFactor,
-                                    islandOffsetXDp, islandOffsetYDp
-                                )
-                            }
-                        )
-                        SliderRow(
-                            label = "Lebar island",
-                            valueText = "${(islandWidthFactor * 100).toInt()}%",
-                            value = islandWidthFactor,
-                            valueRange = 0.7f..1.6f,
-                            enabled = true,
-                            onValueChange = {
-                                onIslandGeometryChange(
-                                    islandScale, it,
-                                    islandOffsetXDp, islandOffsetYDp
-                                )
-                            }
-                        )
-                        SliderRow(
-                            label = "Geser kiri–kanan",
-                            valueText = "${islandOffsetXDp.toInt()}dp",
-                            value = islandOffsetXDp,
-                            valueRange = -140f..140f,
-                            enabled = true,
-                            onValueChange = {
-                                onIslandGeometryChange(
-                                    islandScale, islandWidthFactor,
-                                    it, islandOffsetYDp
-                                )
-                            }
-                        )
-                        SliderRow(
-                            label = "Geser atas–bawah",
-                            valueText = "${islandOffsetYDp.toInt()}dp",
-                            value = islandOffsetYDp,
-                            valueRange = 0f..96f,
-                            enabled = true,
-                            onValueChange = {
-                                onIslandGeometryChange(
-                                    islandScale, islandWidthFactor,
-                                    islandOffsetXDp, it
-                                )
-                            }
-                        )
-                        OutlinedButton(onClick = { onResetIslandGeometry() }) {
-                            Text("Reset posisi island (tengah-atas ala iOS)")
-                        }
-                        Text(
-                            text = "Gaya island mengikuti aturan global: gaya iOS 26 terpilih + Liquid Glass menyala = island kaca; selain itu island solid ala iOS 18.",
-                            fontSize = 12.sp,
+                            text = "›",
+                            fontSize = 22.sp,
                             color = Color(0xFF6E6E73)
                         )
                     }
                     }
-                }
-                item {
-                    Spacer(modifier = Modifier.height(20.dp))
-                    LockSettingsBlock(
-                        lockEnabled = lockEnabled,
-                        lockPrefs = lockPrefs,
-                        lockGlassStyleIs26 = lockGlassStyleIs26,
-                        onLockEnabledChange = onLockEnabledChange,
-                        onLockPrefsChange = onLockPrefsChange,
-                        onLockNow = onLockNow
-                    )
+                    }
                 }
                 item {
                     Spacer(modifier = Modifier.height(20.dp))
@@ -1155,7 +1056,7 @@ private fun LockColorEditor(
 }
 
 @Composable
-private fun SliderRow(
+internal fun SliderRow(
     label: String,
     valueText: String,
     value: Float,
@@ -1195,7 +1096,9 @@ private fun DockGlassPreview(
     iconShape: IconShapeType,
     blurDp: Float,
     tintAlpha: Float,
-    tintDark: Float
+    tintDark: Float,
+    iconVariant: IconVariant = IconVariant.LIGHT,
+    iconTintArgb: Int = 0xFF0A84FF.toInt()
 ) {
     val shape = RoundedCornerShape(26.dp)
     Box(
@@ -1239,7 +1142,9 @@ private fun DockGlassPreview(
                         kind = kind,
                         style = iconStyle,
                         dark = iconDark,
-                        modifier = Modifier.matchParentSize()
+                        modifier = Modifier.matchParentSize(),
+                        variant = iconVariant,
+                        tintArgb = iconTintArgb
                     )
                 }
             }

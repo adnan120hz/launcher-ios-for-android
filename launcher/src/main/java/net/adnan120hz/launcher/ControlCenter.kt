@@ -12,10 +12,12 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -45,6 +47,7 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -56,6 +59,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 /**
  * Control Center overlay panel (slides down over the home screen),
@@ -95,6 +99,9 @@ fun ControlCenterPanel(
     onLockNow: () -> Unit
 ) {
     val glass = style == CcStyle.IOS26
+    // 0.8.0 iOS behaviour: swipe the panel itself up to dismiss it (the
+    // backdrop tap stays as the second way out).
+    var panelDragUpPx by remember { mutableFloatStateOf(0f) }
     val panelShape = RoundedCornerShape(
         topStart = 0.dp, topEnd = 0.dp,
         bottomStart = if (glass) 40.dp else 26.dp,
@@ -110,7 +117,25 @@ fun ControlCenterPanel(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .offset {
+                    androidx.compose.ui.unit.IntOffset(
+                        0,
+                        panelDragUpPx.roundToInt()
+                    )
+                }
                 .clip(panelShape)
+                .pointerInput(onClose) {
+                    detectVerticalDragGestures(
+                        onDragEnd = {
+                            if (panelDragUpPx < -60f) onClose()
+                            panelDragUpPx = 0f
+                        },
+                        onDragCancel = { panelDragUpPx = 0f }
+                    ) { _, dragAmount ->
+                        panelDragUpPx = (panelDragUpPx + dragAmount)
+                            .coerceAtMost(0f)
+                    }
+                }
         ) {
             Box {
                 CcBackdrop(
@@ -131,7 +156,7 @@ fun ControlCenterPanel(
                     CcSmallGrid(glass = glass, onLockNow = onLockNow)
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "Versi 0.7.0",
+                        text = "Versi 0.8.0",
                         fontSize = 10.sp,
                         color = if (glass) Color.White.copy(alpha = 0.55f)
                         else Color(0xFF8E8E93)
@@ -280,9 +305,29 @@ private fun RoundButton(
         active -> Color(0xFF0A84FF)
         else -> Color(0xFF48484A)
     }
+    // 0.8.0 Liquid Glass interaction rule: interactive glass presses
+    // with a spring scale (down to ~0.92) and bounces back. Applied to
+    // every round CC control; the solid iOS 18 skin keeps the same
+    // physics (iOS presses always respond, glass or not).
+    val interaction = remember {
+        androidx.compose.foundation.interaction.MutableInteractionSource()
+    }
+    val pressed by interaction.collectIsPressedAsState()
+    val pressScale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.92f else 1f,
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+        ),
+        label = "ccPress"
+    )
     Box(
         modifier = Modifier
             .size(size)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .clip(RoundedCornerShape(50))
             .background(bg)
             .then(
@@ -296,7 +341,10 @@ private fun RoundButton(
                     Modifier
                 }
             )
-            .clickable { onClick() },
+            .clickable(
+                interactionSource = interaction,
+                indication = null
+            ) { onClick() },
         contentAlignment = Alignment.Center
     ) {
         CcGlyphIcon(

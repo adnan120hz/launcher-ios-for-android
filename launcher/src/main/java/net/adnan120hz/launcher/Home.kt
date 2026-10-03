@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeight
@@ -279,15 +280,35 @@ fun AppIconImage(
                     kind = kind,
                     style = cfg.style,
                     dark = cfg.dark,
-                    modifier = Modifier.matchParentSize()
+                    modifier = Modifier.matchParentSize(),
+                    variant = cfg.effectiveVariant(),
+                    tintArgb = cfg.tintArgb
                 )
             }
             else -> {
                 if (originalBitmap != null) {
+                    // 0.8.0 iOS 26 appearances for real app icons:
+                    // CLEAR reads as a light monochrome glyph, TINTED
+                    // re-inks the bitmap in the user's tint. Full colour
+                    // stays for LIGHT/DARK (the normal iOS default).
+                    val cf = when (cfg.effectiveVariant()) {
+                        IconVariant.CLEAR ->
+                            androidx.compose.ui.graphics.ColorFilter.tint(
+                                Color.White.copy(alpha = 0.92f),
+                                androidx.compose.ui.graphics.BlendMode.SrcIn
+                            )
+                        IconVariant.TINTED ->
+                            androidx.compose.ui.graphics.ColorFilter.tint(
+                                Color(cfg.tintArgb),
+                                androidx.compose.ui.graphics.BlendMode.SrcIn
+                            )
+                        else -> null
+                    }
                     Image(
                         bitmap = originalBitmap.asImageBitmap(),
                         contentDescription = app.label,
-                        modifier = Modifier.matchParentSize()
+                        modifier = Modifier.matchParentSize(),
+                        colorFilter = cf
                     )
                 }
             }
@@ -330,10 +351,32 @@ fun AppIconCell(
     animStyle: AnimStyle,
     onIconLongPress: (AppEntry) -> Unit,
     onSelfClick: () -> Unit = {},
-    iconSize: Dp = 58.dp
+    iconSize: Dp = 58.dp,
+    // 0.8.0 jiggle edit mode (iOS): while editing, every icon rotates
+    // gently around its centre with a per-icon phase; long-press enters.
+    editing: Boolean = false,
+    onEnterEdit: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var rect by remember { mutableStateOf<Rect?>(null) }
+    val jiggleAngle = remember(app.packageName, editing) {
+        if (!editing) null else {
+            val phase = (app.packageName.hashCode() and 0x7fffffff) % 1000 / 1000f
+            Animatable(-1.1f + phase * 0.4f)
+        }
+    }
+    LaunchedEffect(jiggleAngle) {
+        val anim = jiggleAngle ?: return@LaunchedEffect
+        while (true) {
+            anim.animateTo(
+                -anim.value,
+                animationSpec = tween(
+                    durationMillis = 110 + (anim.value.hashCode() % 30).absoluteValue,
+                    easing = androidx.compose.animation.core.LinearEasing
+                )
+            )
+        }
+    }
     // Phase 5 (iOS 26 fluid): the tapped icon spring-squashes while its
     // app flies open — physics, never a stiff linear shrink — and
     // springs back when the user returns home. iOS 18 stays crisp.
@@ -380,7 +423,12 @@ fun AppIconCell(
             .clip(RoundedCornerShape(14.dp))
             .combinedClickable(
                 onClick = {
-                    if (isSelf) {
+                    if (editing) {
+                        // iOS jiggle semantics: tapping any icon while
+                        // editing keeps the editor open — here the same
+                        // per-icon menu the long-press used to open.
+                        onIconLongPress(app)
+                    } else if (isSelf) {
                         // Our own entry never launches the activity; it
                         // is the user's door into launcher Settings.
                         onSelfClick()
@@ -388,7 +436,13 @@ fun AppIconCell(
                         launchApp(context, app.packageName, rootView, rect)
                     }
                 },
-                onLongClick = { onIconLongPress(app) }
+                onLongClick = {
+                    if (editing) onIconLongPress(app)
+                    else {
+                        onEnterEdit()
+                        onIconLongPress(app)
+                    }
+                }
             )
             .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -402,6 +456,7 @@ fun AppIconCell(
                 scaleX = combined
                 scaleY = combined
                 alpha = outgoingAlpha
+                jiggleAngle?.let { rotationZ = it.value }
             },
             onBounds = { rect = it }
         )
@@ -432,7 +487,10 @@ private fun AppPage(
     animStyle: AnimStyle,
     onLongPressHome: () -> Unit,
     onIconLongPress: (AppEntry) -> Unit,
-    onSelfClick: () -> Unit
+    onSelfClick: () -> Unit,
+    editing: Boolean = false,
+    onEnterEdit: () -> Unit = {},
+    onExitEdit: () -> Unit = {}
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         // Adaptive grid geometry (0.7.0): icon size & rhythm scale with
@@ -450,12 +508,16 @@ private fun AppPage(
             else -> 18.dp
         }
         // Empty-area long press opens launcher settings; icon cells
-        // consume their own long presses (icon context menu).
+        // consume their own long presses (icon context menu). In jiggle
+        // edit mode a plain tap on empty space exits instead (iOS).
         Box(
             modifier = Modifier
                 .matchParentSize()
-                .pointerInput(Unit) {
-                    detectTapGestures(onLongPress = { onLongPressHome() })
+                .pointerInput(editing) {
+                    detectTapGestures(
+                        onLongPress = { onLongPressHome() },
+                        onTap = { if (editing) onExitEdit() }
+                    )
                 }
         )
         Column(
@@ -474,7 +536,9 @@ private fun AppPage(
                             AppIconCell(
                                 app, cfg, rootView, animStyle,
                                 onIconLongPress, onSelfClick,
-                                iconSize = iconSize
+                                iconSize = iconSize,
+                                editing = editing,
+                                onEnterEdit = onEnterEdit
                             )
                         }
                     }
@@ -497,13 +561,27 @@ private fun PageDots(count: Int, current: Int) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 6.dp),
-        horizontalArrangement = Arrangement.Center
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         repeat(count) { i ->
+            // 0.8.0 (iOS 26 page indicator): the active dot spring-widens
+            // into a small pill as the page changes, instead of a static
+            // 7.dp dot — same physics language as the rest of the system.
+            val targetWidth = if (i == current) 18.dp else 7.dp
+            val width by androidx.compose.animation.core.animateDpAsState(
+                targetValue = targetWidth,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessMedium
+                ),
+                label = "pageDot"
+            )
             Box(
                 modifier = Modifier
                     .padding(horizontal = 3.dp)
-                    .size(7.dp)
+                    .width(width)
+                    .height(7.dp)
                     .clip(RoundedCornerShape(50))
                     .background(
                         if (i == current) Color.White
@@ -643,6 +721,8 @@ fun HomeScreen(
     }
     var iconShape by remember { mutableStateOf(store.iconShape) }
     var themeMode by remember { mutableStateOf(store.themeMode) }
+    var iconVariant by remember { mutableStateOf(store.iconVariant) }
+    var iconTintArgb by remember { mutableStateOf(store.iconTintArgb) }
     var dockBlurDp by remember { mutableStateOf(store.dockBlurDp) }
     var dockTintAlpha by remember { mutableStateOf(store.dockTintAlpha) }
     var dockTintDark by remember { mutableStateOf(store.dockTintDark) }
@@ -651,6 +731,8 @@ fun HomeScreen(
     var pendingCustomPkg by remember { mutableStateOf<String?>(null) }
     var showSettings by remember { mutableStateOf(false) }
     var showControlCenter by remember { mutableStateOf(false) }
+    // 0.8.0 jiggle edit mode (iOS long-press behaviour).
+    var editingIcons by remember { mutableStateOf(false) }
 
     // ---- Phase 4: iOS lock screen -------------------------------------
     // The overlay service is the primary surface; this in-app layer is
@@ -818,14 +900,18 @@ fun HomeScreen(
 
     fun pushIslandRefresh() {
         if (!IslandState.running) return
-        try {
-            context.startService(
-                Intent(context, IslandService::class.java)
-                    .setAction(IslandService.ACTION_REFRESH)
-            )
-        } catch (e: Exception) {
-            // service start refused; island picks values up next start
-        }
+        // 0.8.0: go through the foreground-service start helper — a
+        // plain startService() call is refused from the background on
+        // modern Android and the island would silently ignore sliders.
+        IslandService.start(context, IslandService.ACTION_REFRESH)
+    }
+
+    // 0.8.0 island auto-revive: whenever Home appears and the island is
+    // supposed to be on (unlocked + enabled + overlay), make sure the
+    // foreground service is actually alive. This is the fix for
+    // "dynamic island belum berfungsi" after the system kills us.
+    LaunchedEffect(dynamicIslandUnlocked) {
+        IslandService.ensureRunning(context, dynamicIslandUnlocked)
     }
 
     suspend fun runUpdateCheck(manual: Boolean) {
@@ -886,13 +972,19 @@ fun HomeScreen(
     // glass anywhere is a bug state, never rendered.
     val renderIconStyle =
         if (!glassEnabled) IconStyle.IOS18 else iconStyle
+    // 0.8.0: the iOS 26 appearance (Terang/Gelap/Clear/Tinted) extends
+    // the old themeMode — themeMode still drives `dark`; variant picks
+    // the Clear/Tinted families. effectiveVariant() in IconConfig maps
+    // DARK to the dark pack, so dark follows variant OR themeMode.
     val iconCfg = IconConfig(
         style = renderIconStyle,
-        dark = iconDark,
+        dark = iconDark || iconVariant == IconVariant.DARK,
         shape = iconShape,
         shadowsEnabled = shadowsEnabled,
         kindByPackage = kindByPackage,
-        customTick = customTick
+        customTick = customTick,
+        variant = iconVariant,
+        tintArgb = iconTintArgb
     )
     val effectiveDockBlur = (if (dockBlurDp >= 0f) dockBlurDp
         else perfTier.blurRadiusDp).coerceAtMost(blurCapDp(perfTier))
@@ -975,6 +1067,10 @@ fun HomeScreen(
             onIconStyleChange = { iconStyle = it; store.iconStyle = it },
             onIconShapeChange = { iconShape = it; store.iconShape = it },
             onThemeModeChange = { themeMode = it; store.themeMode = it },
+            iconVariant = iconVariant,
+            iconTintArgb = iconTintArgb,
+            onIconVariantChange = { iconVariant = it; store.iconVariant = it },
+            onIconTintChange = { iconTintArgb = it; store.iconTintArgb = it },
             onDockBlurChange = { dockBlurDp = it; store.dockBlurDp = it },
             onDockTintAlphaChange = {
                 dockTintAlpha = it; store.dockTintAlpha = it
@@ -1153,7 +1249,10 @@ fun HomeScreen(
                         animStyle = animStyle,
                         onLongPressHome = { showSettings = true },
                         onIconLongPress = { menuApp = it },
-                        onSelfClick = { showSettings = true }
+                        onSelfClick = { showSettings = true },
+                        editing = editingIcons,
+                        onEnterEdit = { editingIcons = true },
+                        onExitEdit = { editingIcons = false }
                     )
                 } else {
                     AppLibraryScreen(

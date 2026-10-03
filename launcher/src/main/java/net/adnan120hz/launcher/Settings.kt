@@ -118,6 +118,24 @@ class LauncherStore(context: Context) {
             prefs.edit().putString(KEY_THEME_MODE, value.name).apply()
         }
 
+    /** iOS 26 icon appearance (0.8.0): Terang / Gelap / Clear / Tinted. */
+    var iconVariant: IconVariant
+        get() = runCatching {
+            IconVariant.valueOf(
+                prefs.getString(KEY_ICON_VARIANT, IconVariant.LIGHT.name)!!
+            )
+        }.getOrDefault(IconVariant.LIGHT)
+        set(value) {
+            prefs.edit().putString(KEY_ICON_VARIANT, value.name).apply()
+        }
+
+    /** User-picked tint (ARGB) for the TINTED icon appearance. */
+    var iconTintArgb: Int
+        get() = prefs.getInt(KEY_ICON_TINT, 0xFF0A84FF.toInt())
+        set(value) {
+            prefs.edit().putInt(KEY_ICON_TINT, value).apply()
+        }
+
     /** Manual dock glass tuning (Phase 3). dockBlurDp < 0 means
      *  "follow the performance tier default". The effective radius is
      *  always capped per tier so Entry devices stay cheap. */
@@ -186,6 +204,17 @@ class LauncherStore(context: Context) {
      *  on; otherwise the island renders solid iOS 18. */
     fun islandGlassStyleIs26(): Boolean =
         glassEnabled && effectiveCcStyle() == CcStyle.IOS26
+
+    /** Dynamic Island master switch (0.8.0). Default ON: the island is
+     *  supposed to work end to end once the user unlocked it and granted
+     *  the overlay permission; before unlock the follow-gate keeps the
+     *  service off regardless of this flag. Persisted so the service
+     *  policy (IslandService.shouldBeRunning) survives process death. */
+    var islandEnabled: Boolean
+        get() = prefs.getBoolean(KEY_ISLAND_ENABLED, true)
+        set(value) {
+            prefs.edit().putBoolean(KEY_ISLAND_ENABLED, value).apply()
+        }
 
     /** App open/close animation style (Phase 5). */
     var animStyle: AnimStyle
@@ -306,6 +335,9 @@ class LauncherStore(context: Context) {
         private const val KEY_ISLAND_WIDTH = "island_width_factor"
         private const val KEY_ISLAND_OFFSET_X = "island_offset_x_dp"
         private const val KEY_ISLAND_OFFSET_Y = "island_offset_y_dp"
+        private const val KEY_ISLAND_ENABLED = "island_enabled"
+        private const val KEY_ICON_VARIANT = "icon_variant"
+        private const val KEY_ICON_TINT = "icon_tint_argb"
     }
 }
 

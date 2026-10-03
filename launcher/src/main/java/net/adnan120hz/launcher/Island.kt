@@ -100,9 +100,36 @@ object IslandState {
     @Volatile
     var running: Boolean = false
 
+    /** 0.8.0 status mirrors for the settings page: the plain `running`
+     *  flag alone could not explain *why* the island is off. These are
+     *  process-local honesty, refreshed by the service on every start. */
+    @Volatile
+    var windowAttached: Boolean = false
+
+    /** Short machine code: OK / NO_OVERLAY / START_REFUSED / STOPPED. */
+    @Volatile
+    var lastError: String = "STOPPED"
+
+    /** When > 0, the overlay pill is forced visible (test mode) until
+     *  this epoch millis, regardless of the live state priority. */
+    @Volatile
+    var testUntilMs: Long = 0L
+
     fun startTimer(seconds: Int) {
         timerEndAt = System.currentTimeMillis() + seconds * 1000L
         timerLeftSec = seconds
+    }
+
+    // Battery exemption state for the island settings page (0.8.0):
+    // whether the system is ignoring battery optimizations for us.
+    fun isBatteryOptimizationIgnored(context: Context): Boolean {
+        return try {
+            val pm = context.getSystemService(Context.POWER_SERVICE)
+                as android.os.PowerManager
+            pm.isIgnoringBatteryOptimizations(context.packageName)
+        } catch (e: Exception) {
+            false
+        }
     }
 }
 
@@ -126,6 +153,13 @@ class IslandService : Service() {
         when (intent?.action) {
             ACTION_TIMER -> IslandState.startTimer(60)
             ACTION_REFRESH -> applyGeometry()
+            ACTION_SHOW_NOW -> {
+                // Explicit user test from the settings page: keep the
+                // pill forced visible for a few seconds so they can see
+                // it even with no live activity, then it returns to the
+                // normal state priority. Still real data (clock).
+                IslandState.testUntilMs = System.currentTimeMillis() + 12_000L
+            }
         }
         return START_STICKY
     }
@@ -151,6 +185,13 @@ class IslandService : Service() {
         super.onCreate()
         IslandState.running = true
 
+        // 0.8.0: this is a FOREGROUND service now. 0.7.0 ran it as a
+        // plain background service started with startService(), so the
+        // process died silently whenever the user left the launcher and
+        // the island "never worked" on the real phone. Promote first,
+        // attach the window after.
+        startIslandForeground()
+
         batteryReceiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context, i: Intent) {
                 val status = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
@@ -166,6 +207,8 @@ class IslandService : Service() {
 
         if (!Settings.canDrawOverlays(this)) {
             // Permission revoked since start; nothing we can draw.
+            IslandState.lastError = "NO_OVERLAY"
+            IslandState.windowAttached = false
             stopSelf()
             return
         }
@@ -203,16 +246,72 @@ class IslandService : Service() {
         windowManager = wm
         try {
             wm.addView(view, params)
+            IslandState.windowAttached = true
+            IslandState.lastError = "OK"
             lifecycleOwner.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
             lifecycleOwner.handleLifecycleEvent(Lifecycle.Event.ON_START)
             lifecycleOwner.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
         } catch (e: Exception) {
+            IslandState.windowAttached = false
+            IslandState.lastError = "START_REFUSED"
             stopSelf()
+        }
+    }
+
+    /** Foreground promotion — same proven pattern as LockScreenService:
+     *  low-importance channel, ongoing notification that opens the app,
+     *  specialUse type on API 34+. If the platform refuses, the error
+     *  code lands in IslandState so Settings can explain it honestly. */
+    private fun startIslandForeground() {
+        val channelId = "dynamic_island"
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE)
+            as android.app.NotificationManager
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(
+                android.app.NotificationChannel(
+                    channelId,
+                    "Dynamic Island",
+                    android.app.NotificationManager.IMPORTANCE_LOW
+                )
+            )
+        }
+        val contentIntent = android.app.PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = androidx.core.app.NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Dynamic Island aktif")
+            .setContentText("Pill gaya iOS menampilkan jam, daya, timer & lagu (data nyata).")
+            .setContentIntent(contentIntent)
+            .setOngoing(true)
+            .build()
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                startForeground(
+                    NOTIF_ID,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
+        } catch (e: Exception) {
+            // Platform refused the FGS start; keep the process alive as
+            // long as it lasts and report the refusal on the page.
+            IslandState.lastError = "START_REFUSED"
         }
     }
 
     override fun onDestroy() {
         IslandState.running = false
+        IslandState.windowAttached = false
+        if (IslandState.lastError == "OK") IslandState.lastError = "STOPPED"
+        IslandState.testUntilMs = 0L
         batteryReceiver?.let {
             try {
                 unregisterReceiver(it)
@@ -261,6 +360,57 @@ class IslandService : Service() {
     companion object {
         const val ACTION_TIMER = "net.adnan120hz.launcher.action.ISLAND_TIMER"
         const val ACTION_REFRESH = "net.adnan120hz.launcher.action.ISLAND_REFRESH"
+        const val ACTION_SHOW_NOW = "net.adnan120hz.launcher.action.ISLAND_SHOW_NOW"
+        private const val NOTIF_ID = 2001
+
+        /** Whether the island is supposed to run right now: user toggle
+         *  on (0.8.0 pref) AND overlay granted. The follow-gate is
+         *  checked by the callers that know the unlock state; the
+         *  service itself only ever starts when a caller passes this
+         *  gate, and the settings page reads the same state so page
+         *  and service never disagree. */
+        fun shouldBeRunning(context: Context): Boolean {
+            val store = LauncherStore(context)
+            return store.islandEnabled && Settings.canDrawOverlays(context)
+        }
+
+        /** Start (or nudge) the island foreground service. Uses
+         *  startForegroundService — the ONLY start API that survives
+         *  background restrictions on modern Android. Wrapped: a refused
+         *  start is recorded, never thrown at the UI. */
+        fun start(context: Context, action: String? = null): Boolean {
+            return try {
+                val intent = Intent(context, IslandService::class.java)
+                if (action != null) intent.action = action
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                true
+            } catch (e: Exception) {
+                IslandState.lastError = "START_REFUSED"
+                false
+            }
+        }
+
+        /** Restart-if-needed: called from Home when it comes to the
+         *  foreground, so a killed island revives itself without the
+         *  user hunting for a toggle. Only acts when [shouldBeRunning]
+         *  AND the follow-gate unlock flag is set. */
+        fun ensureRunning(context: Context, unlocked: Boolean) {
+            if (!unlocked) return
+            if (!shouldBeRunning(context)) return
+            if (!IslandState.running) start(context)
+        }
+
+        fun stop(context: Context) {
+            try {
+                context.stopService(Intent(context, IslandService::class.java))
+            } catch (e: Exception) {
+                // already stopped
+            }
+        }
     }
 }
 
@@ -306,14 +456,74 @@ fun IslandPill() {
         android.media.session.PlaybackState.STATE_PLAYING
 
     val charging = IslandState.chargingPct
+    // Test window (settings "Tampilkan island sekarang"): the pill stays
+    // visibly pinned while it runs; the state below is still real data.
+    val testActive = IslandState.testUntilMs > System.currentTimeMillis()
     val mode = when {
         timerLeft > 0 -> IslandMode.TIMER
         // MUSIC shows ONLY with a real title — no data, no state.
         !musicTitle.isNullOrBlank() -> IslandMode.MUSIC
         charging >= 0 -> IslandMode.CHARGING
+        testActive -> IslandMode.CLOCK
         else -> IslandMode.CLOCK
     }
 
+    val timeText = remember(tick) {
+        SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+    }
+
+    IslandPillContent(
+        mode = mode,
+        scale = geoScale,
+        widthFactor = geoWidthFactor,
+        glass = glassIsland,
+        timeText = timeText,
+        chargingPct = charging,
+        timerLeftSec = timerLeft,
+        musicTitle = musicTitle,
+        musicArtist = musicArtist,
+        musicPlaying = musicPlaying,
+        onTap = {
+            // Real actions only: music pill toggles play/pause; any
+            // other state opens the launcher itself.
+            if (mode == IslandMode.MUSIC && controller != null) {
+                if (musicPlaying) controller.transportControls.pause()
+                else controller.transportControls.play()
+            } else {
+                try {
+                    context.startActivity(
+                        Intent(context, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } catch (e: Exception) {
+                    // launcher entry refused; nothing else to do
+                }
+            }
+        }
+    )
+}
+
+/**
+ * The pill body, parameterised so the Dynamic Island settings page can
+ * preview every state (compact + expanded) with the EXACT renderer the
+ * overlay uses. Real overlay data flows in through [IslandPill]; the
+ * preview passes its own values, so what the user tunes here is what
+ * appears on screen — no mock renderer anywhere.
+ */
+@Composable
+fun IslandPillContent(
+    mode: IslandMode,
+    scale: Float,
+    widthFactor: Float,
+    glass: Boolean,
+    timeText: String,
+    chargingPct: Int,
+    timerLeftSec: Int,
+    musicTitle: String?,
+    musicArtist: String?,
+    musicPlaying: Boolean,
+    onTap: () -> Unit = {}
+) {
     val baseWidth = when (mode) {
         IslandMode.CLOCK -> 118.dp
         IslandMode.CHARGING -> 176.dp
@@ -321,8 +531,8 @@ fun IslandPill() {
         IslandMode.MUSIC -> 292.dp
     }
     val baseHeight = if (mode == IslandMode.CLOCK) 34.dp else 58.dp
-    val targetWidth = baseWidth * (geoWidthFactor * geoScale)
-    val targetHeight = baseHeight * geoScale
+    val targetWidth = baseWidth * (widthFactor * scale)
+    val targetHeight = baseHeight * scale
     val springSpec = spring<androidx.compose.ui.unit.Dp>(
         dampingRatio = Spring.DampingRatioMediumBouncy,
         stiffness = Spring.StiffnessMediumLow
@@ -330,21 +540,18 @@ fun IslandPill() {
     val width by animateDpAsState(targetWidth, springSpec, label = "islandWidth")
     val height by animateDpAsState(targetHeight, springSpec, label = "islandHeight")
 
-    val timeText = remember(tick) {
-        SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-    }
-    val fontK = geoScale.coerceIn(0.8f, 1.3f)
+    val fontK = scale.coerceIn(0.8f, 1.3f)
 
     Box(
         modifier = Modifier
             .width(width)
             .height(height)
             .clip(
-                if (glassIsland) RoundedCornerShape(50)
+                if (glass) RoundedCornerShape(50)
                 else RoundedCornerShape(34.dp)
             )
             .then(
-                if (glassIsland) {
+                if (glass) {
                     Modifier.background(
                         Brush.verticalGradient(
                             listOf(
@@ -366,23 +573,7 @@ fun IslandPill() {
                     Modifier.background(Color.Black)
                 }
             )
-            .clickable {
-                // Real actions only: music pill toggles play/pause; any
-                // other state opens the launcher itself.
-                if (mode == IslandMode.MUSIC && controller != null) {
-                    if (musicPlaying) controller.transportControls.pause()
-                    else controller.transportControls.play()
-                } else {
-                    try {
-                        context.startActivity(
-                            Intent(context, MainActivity::class.java)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    } catch (e: Exception) {
-                        // launcher entry refused; nothing else to do
-                    }
-                }
-            }
+            .clickable { onTap() }
             .padding(horizontal = (16 * fontK).dp),
         contentAlignment = Alignment.Center
     ) {

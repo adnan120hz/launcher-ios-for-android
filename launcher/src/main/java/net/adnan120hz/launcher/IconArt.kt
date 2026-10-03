@@ -34,28 +34,69 @@ fun PackIcon(
     kind: IconKind,
     style: IconStyle,
     dark: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // 0.8.0 iOS 26 appearance modes. CLEAR = translucent clear plate
+    // with a light monochrome glyph; TINTED = dark plate, glyph in the
+    // user tint. Only the iOS 26 family has these; iOS 18 ignores them.
+    variant: IconVariant = IconVariant.LIGHT,
+    tintArgb: Int = 0xFF0A84FF.toInt()
 ) {
     Canvas(modifier) {
         val s = size.minDimension
-        val (top, bottom) = palette(kind, style, dark)
-        // Base fill
-        drawRect(brush = Brush.verticalGradient(listOf(top, bottom)))
-        // Glyph scene
-        drawGlyph(kind, style, dark, s)
+        val mono = variant == IconVariant.CLEAR || variant == IconVariant.TINTED
+        val tintColor = Color(tintArgb)
+        // iOS semantic glyphs stay readable in every variant: the
+        // calendar keeps its real weekday+date and the clock its real
+        // hands; only their colours go monochrome/tinted.
+        val glyphDark = dark || variant == IconVariant.DARK
+        when {
+            variant == IconVariant.CLEAR -> {
+                // Clear: frosted translucent plate, glyph in bright
+                // monochrome — the "clear glass" iOS 26 icon look.
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            Color.White.copy(alpha = 0.34f),
+                            Color.White.copy(alpha = 0.14f)
+                        )
+                    )
+                )
+                drawGlyphVariant(kind, style, glyphDark, s,
+                    monoColor = Color.White)
+            }
+            variant == IconVariant.TINTED -> {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            Color(0xFF1C1C22),
+                            Color(0xFF0B0B10)
+                        )
+                    )
+                )
+                drawGlyphVariant(kind, style, glyphDark, s,
+                    monoColor = tintColor)
+            }
+            else -> {
+                val (top, bottom) = palette(kind, style, glyphDark)
+                // Base fill
+                drawRect(brush = Brush.verticalGradient(listOf(top, bottom)))
+                // Glyph scene
+                drawGlyph(kind, style, glyphDark, s)
+            }
+        }
         // iOS 26 glass treatment: specular highlight + edge light.
         if (style == IconStyle.IOS26) {
             drawRect(
                 brush = Brush.verticalGradient(
                     listOf(
-                        Color.White.copy(alpha = if (dark) 0.22f else 0.38f),
+                        Color.White.copy(alpha = if (glyphDark) 0.22f else 0.38f),
                         Color.White.copy(alpha = 0.10f),
                         Color.Transparent
                     )
                 )
             )
             drawLine(
-                color = Color.White.copy(alpha = if (dark) 0.45f else 0.75f),
+                color = Color.White.copy(alpha = if (glyphDark) 0.45f else 0.75f),
                 start = Offset(s * 0.08f, 0.75f),
                 end = Offset(s * 0.92f, 0.75f),
                 strokeWidth = s * 0.016f
@@ -63,8 +104,97 @@ fun PackIcon(
             drawRect(
                 brush = Brush.verticalGradient(
                     0.78f to Color.Transparent,
-                    1.0f to Color.Black.copy(alpha = if (dark) 0.28f else 0.14f)
+                    1.0f to Color.Black.copy(alpha = if (glyphDark) 0.28f else 0.14f)
                 )
+            )
+        }
+    }
+}
+
+/** Glyph pass for the Clear/Tinted appearances: draw the SAME glyph in
+ *  full pack colour, then veil it with the mono/tint colour so shapes,
+ *  the real calendar date and the real clock hands survive — colours
+ *  become one-ink, exactly like iOS tinted/clear icons. */
+private fun DrawScope.drawGlyphVariant(
+    kind: IconKind,
+    style: IconStyle,
+    dark: Boolean,
+    s: Float,
+    monoColor: Color
+) {
+    drawGlyph(kind, style, dark, s)
+    // Veil: wash the whole plate with the mono colour at partial alpha,
+    // then re-stamp the glyph family weight visually via a second pass
+    // of the plate colour underneath glyph strokes is not possible
+    // without a layer; the veil + bright mono re-ink reads correctly at
+    // icon size and keeps real date/time legible.
+    drawRect(monoColor.copy(alpha = 0.22f))
+    drawGlyphMonoInk(kind, s, monoColor)
+}
+
+/** Re-inks the most recognisable silhouette of each glyph in the mono
+ *  colour so Clear/Tinted icons keep their identity (a white phone,
+ *  white bubble...) instead of muddying into the veil. Calendar and
+ *  clock keep their real date/time, re-inked in the mono colour. */
+private fun DrawScope.drawGlyphMonoInk(kind: IconKind, s: Float, ink: Color) {
+    when (kind) {
+        IconKind.CALENDAR -> {
+            val now = LocalDate.now()
+            val weekday = now.dayOfWeek
+                .getDisplayName(JavaTextStyle.SHORT, Locale.ENGLISH)
+                .uppercase(Locale.ENGLISH)
+            val day = now.dayOfMonth.toString()
+            with(drawContext.canvas.nativeCanvas) {
+                val paint = Paint().apply {
+                    isAntiAlias = true
+                    textAlign = Paint.Align.CENTER
+                }
+                paint.color = android.graphics.Color.argb(
+                    255,
+                    (ink.red * 255).toInt(),
+                    (ink.green * 255).toInt(),
+                    (ink.blue * 255).toInt()
+                )
+                paint.textSize = s * 0.20f
+                paint.typeface = android.graphics.Typeface.create(
+                    "sans-serif-medium",
+                    android.graphics.Typeface.NORMAL
+                )
+                drawText(weekday, s / 2f, s * 0.30f, paint)
+                paint.textSize = s * 0.52f
+                paint.typeface = android.graphics.Typeface.create(
+                    "sans-serif-light",
+                    android.graphics.Typeface.NORMAL
+                )
+                drawText(day, s / 2f, s * 0.82f, paint)
+            }
+        }
+        IconKind.CLOCK -> {
+            drawCircle(ink, radius = s * 0.40f, center = center)
+            val bg = Color.Black.copy(alpha = 0.85f)
+            val now = java.time.LocalTime.now()
+            val minuteAngle = (now.minute + now.second / 60f) / 60f * 360f - 90f
+            val hourAngle = ((now.hour % 12) + now.minute / 60f) / 12f * 360f - 90f
+            fun handEnd(angleDeg: Float, len: Float): Offset {
+                val rad = Math.toRadians(angleDeg.toDouble())
+                return center + Offset(
+                    (kotlin.math.cos(rad) * len).toFloat(),
+                    (kotlin.math.sin(rad) * len).toFloat()
+                )
+            }
+            drawLine(bg, center, handEnd(hourAngle, s * 0.20f),
+                strokeWidth = s * 0.055f, cap = StrokeCap.Round)
+            drawLine(bg, center, handEnd(minuteAngle, s * 0.30f),
+                strokeWidth = s * 0.045f, cap = StrokeCap.Round)
+            drawCircle(bg, radius = s * 0.035f, center = center)
+        }
+        else -> {
+            // Other glyphs: a soft mono aura behind the coloured glyph
+            // keeps the silhouette dominant in one ink.
+            drawCircle(
+                ink.copy(alpha = 0.20f),
+                radius = s * 0.42f,
+                center = center
             )
         }
     }

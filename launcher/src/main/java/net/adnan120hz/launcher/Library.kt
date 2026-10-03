@@ -3,6 +3,7 @@ package net.adnan120hz.launcher
 import android.graphics.Rect
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
@@ -21,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,6 +30,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -48,6 +52,13 @@ fun AppLibraryScreen(
     val context = LocalContext.current
     val rootView = LocalView.current
     var query by remember { mutableStateOf("") }
+    // 0.8.0: the keyboard must open ONLY when the user taps the search
+    // field itself. A normally-focusable TextField inside a launcher
+    // page grabbed window focus whenever the page attached, popping
+    // the keyboard unasked. The field stays unfocused until tapped;
+    // tapping flips it into the real, focusable editor.
+    var searchFocused by remember { mutableStateOf(false) }
+    val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
 
     val filtered = remember(apps, query) {
         if (query.isBlank()) apps
@@ -113,7 +124,8 @@ fun AppLibraryScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Search field — filters the list below in real time
+        // Search field — filters the list below in real time. Only the
+        // field itself can raise the keyboard (see searchFocused above).
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -125,15 +137,39 @@ fun AppLibraryScreen(
                 onValueChange = { query = it },
                 placeholder = { Text("Cari aplikasi") },
                 singleLine = true,
+                enabled = searchFocused,
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = Color.Transparent,
                     unfocusedContainerColor = Color.Transparent,
                     disabledContainerColor = Color.Transparent,
                     focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledTextColor = Color(0xFF1C1C1E),
+                    disabledPlaceholderColor = Color(0xFF6E6E73)
                 ),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (searchFocused) {
+                            Modifier.focusRequester(focusRequester)
+                        } else {
+                            Modifier.pointerInput(Unit) {
+                                detectTapGestures {
+                                    searchFocused = true
+                                }
+                            }
+                        }
+                    )
             )
+            if (searchFocused) {
+                LaunchedEffect(Unit) {
+                    try {
+                        focusRequester.requestFocus()
+                    } catch (e: Exception) {
+                        // focus already moved; editor still works
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
