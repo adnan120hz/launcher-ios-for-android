@@ -73,13 +73,18 @@ fun LauncherApp() {
             }
         )
     } else {
-        HomeScreen(dynamicIslandUnlocked = dynamicIslandUnlocked)
+        HomeScreen(
+            dynamicIslandUnlocked = dynamicIslandUnlocked,
+            onDynamicIslandUnlock = {
+                prefs.edit().putBoolean(KEY_DYNAMIC_ISLAND_UNLOCKED, true).apply()
+                dynamicIslandUnlocked = true
+            }
+        )
     }
 }
 
-private const val TIKTOK_URL =
+internal const val TIKTOK_URL =
     "https://www.tiktok.com/@adnan.120hz?_r=1&_t=ZS-9AFVyGwfDCI"
-
 // Multi-step onboarding skeleton: intro -> developer credit -> follow gate.
 // Layout standard: consistent 24.dp page padding, 16.dp spacing everywhere.
 @Composable

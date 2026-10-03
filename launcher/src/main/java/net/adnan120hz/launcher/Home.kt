@@ -3,11 +3,17 @@ package net.adnan120hz.launcher
 import android.graphics.Rect
 import android.os.Build
 import android.view.View
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -394,7 +400,10 @@ private fun GlassDock(
 }
 
 @Composable
-fun HomeScreen(dynamicIslandUnlocked: Boolean) {
+fun HomeScreen(
+    dynamicIslandUnlocked: Boolean,
+    onDynamicIslandUnlock: () -> Unit
+) {
     val context = LocalContext.current
     val rootView = LocalView.current
     val store = remember { LauncherStore(context) }
@@ -403,7 +412,12 @@ fun HomeScreen(dynamicIslandUnlocked: Boolean) {
     var glassEnabled by remember { mutableStateOf(store.glassEnabled) }
     var perfTier by remember { mutableStateOf(store.perfTier) }
     var dockPackages by remember { mutableStateOf(store.dockPackages) }
+    var ccStyle by remember { mutableStateOf(store.ccStyle) }
+    var hideSettingsInLibrary by remember {
+        mutableStateOf(store.hideSettingsInLibrary)
+    }
     var showSettings by remember { mutableStateOf(false) }
+    var showControlCenter by remember { mutableStateOf(false) }
 
     val apps by produceState<List<AppEntry>>(initialValue = emptyList()) {
         value = withContext(Dispatchers.IO) { loadInstalledApps(context) }
@@ -426,6 +440,9 @@ fun HomeScreen(dynamicIslandUnlocked: Boolean) {
             glassEnabled = glassEnabled,
             perfTier = perfTier,
             dockPackages = dockPackages,
+            ccStyle = ccStyle,
+            hideSettingsInLibrary = hideSettingsInLibrary,
+            dynamicIslandUnlocked = dynamicIslandUnlocked,
             onIconStyleChange = { iconStyle = it; store.iconStyle = it },
             onGlassChange = { glassEnabled = it; store.glassEnabled = it },
             onTierChange = { perfTier = it; store.perfTier = it },
@@ -435,9 +452,29 @@ fun HomeScreen(dynamicIslandUnlocked: Boolean) {
                 dockPackages = defaults
                 store.dockPackages = defaults
             },
+            onCcStyleChange = { ccStyle = it; store.ccStyle = it },
+            onHideSettingsChange = {
+                hideSettingsInLibrary = it
+                store.hideSettingsInLibrary = it
+            },
+            onDynamicIslandUnlock = onDynamicIslandUnlock,
+            onOpenControlCenter = {
+                showSettings = false
+                showControlCenter = true
+            },
             onBack = { showSettings = false }
         )
         return
+    }
+
+    // App Library list: optionally hide the OEM Settings entry (list only).
+    val systemSettingsPkg = remember { resolveSystemSettingsPackage(context) }
+    val libraryApps = remember(apps, hideSettingsInLibrary, systemSettingsPkg) {
+        if (hideSettingsInLibrary && systemSettingsPkg != null) {
+            apps.filter { it.packageName != systemSettingsPkg }
+        } else {
+            apps
+        }
     }
 
     val shadowsEnabled = perfTier != PerfTier.ENTRY
@@ -473,7 +510,7 @@ fun HomeScreen(dynamicIslandUnlocked: Boolean) {
                     )
                 } else {
                     AppLibraryScreen(
-                        apps = apps,
+                        apps = libraryApps,
                         iconStyle = iconStyle,
                         shadowsEnabled = shadowsEnabled,
                         dynamicIslandUnlocked = dynamicIslandUnlocked,
@@ -506,6 +543,35 @@ fun HomeScreen(dynamicIslandUnlocked: Boolean) {
                 screenHeight = screenHeight,
                 rootView = rootView,
                 onEmptySlotClick = { showSettings = true }
+            )
+        }
+
+        // Top-edge swipe opens the Control Center overlay.
+        if (!showControlCenter) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(26.dp)
+                    .pointerInput(Unit) {
+                        detectVerticalDragGestures { _, dragAmount ->
+                            if (dragAmount > 6f) showControlCenter = true
+                        }
+                    }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showControlCenter,
+            enter = slideInVertically { -it } + fadeIn(),
+            exit = slideOutVertically { -it } + fadeOut()
+        ) {
+            ControlCenterPanel(
+                style = if (!glassEnabled) CcStyle.IOS18 else ccStyle,
+                glassEnabled = glassEnabled,
+                tier = perfTier,
+                screenHeight = screenHeight,
+                onClose = { showControlCenter = false }
             )
         }
     }

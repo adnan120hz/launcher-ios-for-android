@@ -1,5 +1,8 @@
 package net.adnan120hz.launcher
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,6 +23,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -40,15 +44,27 @@ fun SettingsScreen(
     glassEnabled: Boolean,
     perfTier: PerfTier,
     dockPackages: List<String>,
+    ccStyle: CcStyle,
+    hideSettingsInLibrary: Boolean,
+    dynamicIslandUnlocked: Boolean,
     onIconStyleChange: (IconStyle) -> Unit,
     onGlassChange: (Boolean) -> Unit,
     onTierChange: (PerfTier) -> Unit,
     onDockChange: (List<String>) -> Unit,
     onResetDock: () -> Unit,
+    onCcStyleChange: (CcStyle) -> Unit,
+    onHideSettingsChange: (Boolean) -> Unit,
+    onDynamicIslandUnlock: () -> Unit,
+    onOpenControlCenter: () -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
     var pickerSlot by remember { mutableStateOf<Int?>(null) }
+    var permTick by remember { mutableIntStateOf(0) }
+    val overlayGranted = remember(permTick) {
+        Settings.canDrawOverlays(context)
+    }
+    val islandRunning = remember(permTick) { IslandState.running }
 
     Column(
         modifier = Modifier
@@ -219,6 +235,157 @@ fun SettingsScreen(
                             )
                         }
                         Text(text = "›", fontSize = 18.sp, color = Color(0xFF6E6E73))
+                    }
+                }
+                item {
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    SectionTitle("Control Center")
+                    CcStyle.entries.forEach { style ->
+                        RadioRow(
+                            label = style.label,
+                            selected = ccStyle == style,
+                            onClick = { onCcStyleChange(style) }
+                        )
+                    }
+                    Text(
+                        text = if (!glassEnabled)
+                            "Liquid Glass mati, jadi Control Center otomatis pakai gaya iOS 18."
+                        else
+                            "Buka dengan geser dari tepi atas home screen, atau tombol di bawah.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(onClick = { onOpenControlCenter() }) {
+                        Text("Buka Control Center")
+                    }
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    SectionTitle("App Library")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Sembunyikan Settings bawaan dari App Library",
+                            fontSize = 15.sp,
+                            color = Color.Black,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = hideSettingsInLibrary,
+                            onCheckedChange = { onHideSettingsChange(it) }
+                        )
+                    }
+                    Text(
+                        text = "Cuma menyembunyikan ikon Settings bawaan HP dari daftar App Library (saat Control Center launcher dipakai). Aplikasi Settings-nya sendiri tidak diutak-atik.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    SectionTitle("Dynamic Island")
+                    if (!dynamicIslandUnlocked) {
+                        Text(
+                            text = "🔒 Terkunci — fitur khusus Dynamic Island iOS 26 UI.",
+                            fontSize = 15.sp,
+                            color = Color.Black
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(onClick = {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(TIKTOK_URL))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }) {
+                            Text("Buka TikTok & Follow")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(onClick = { onDynamicIslandUnlock() }) {
+                            Text("Saya sudah follow — buka fitur")
+                        }
+                        Text(
+                            text = "Follow tidak bisa diverifikasi otomatis; ini konfirmasi mandiri (sistem kepercayaan), sama seperti onboarding.",
+                            fontSize = 12.sp,
+                            color = Color(0xFF6E6E73)
+                        )
+                    } else {
+                        Text(
+                            text = "Izin tampil di atas aplikasi lain (overlay): " +
+                                if (overlayGranted) "sudah diberikan ✓"
+                                else "belum diberikan",
+                            fontSize = 14.sp,
+                            color = Color.Black
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        if (!overlayGranted) {
+                            OutlinedButton(onClick = {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}")
+                                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }) {
+                                Text("Izinkan overlay")
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        Text(
+                            text = "Status Dynamic Island: " +
+                                if (islandRunning) "aktif" else "mati",
+                            fontSize = 14.sp,
+                            color = Color.Black
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row {
+                            OutlinedButton(onClick = {
+                                if (overlayGranted) {
+                                    context.startService(
+                                        Intent(context, IslandService::class.java)
+                                    )
+                                } else {
+                                    context.startActivity(
+                                        Intent(
+                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                            Uri.parse("package:${context.packageName}")
+                                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }
+                                permTick++
+                            }) {
+                                Text("Aktifkan Island")
+                            }
+                            Spacer(modifier = Modifier.padding(horizontal = 6.dp))
+                            OutlinedButton(onClick = {
+                                context.stopService(
+                                    Intent(context, IslandService::class.java)
+                                )
+                                permTick++
+                            }) {
+                                Text("Matikan Island")
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(onClick = {
+                            context.startService(
+                                Intent(context, IslandService::class.java)
+                                    .setAction(IslandService.ACTION_TIMER)
+                            )
+                            permTick++
+                        }) {
+                            Text("Tes timer 1 menit di Island")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(onClick = { permTick++ }) {
+                            Text("Segarkan status izin")
+                        }
+                        Text(
+                            text = "Island menampilkan jam, status charging, timer, dan lagu yang diputar (lagu butuh izin akses notifikasi dari baris Musik di Control Center).",
+                            fontSize = 12.sp,
+                            color = Color(0xFF6E6E73)
+                        )
                     }
                 }
                 item {

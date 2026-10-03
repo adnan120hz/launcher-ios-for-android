@@ -3,6 +3,13 @@
 
     <!-- Needed so the launcher can list all installed apps (home-screen role) -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <!-- Read Wi-Fi state for the Control Center tile -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- System brightness slider in Control Center (special access,
+         granted by the user via ACTION_MANAGE_WRITE_SETTINGS) -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <!-- Dynamic Island overlay window (granted via ACTION_MANAGE_OVERLAY_PERMISSION) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
@@ -21,6 +28,23 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Dynamic Island overlay window host -->
+        <service
+            android:name=".IslandService"
+            android:exported="false" />
+
+        <!-- Presence of this listener (once the user grants notification
+             access) lets MediaSessionManager expose now-playing info -->
+        <service
+            android:name=".MusicListenerService"
+            android:exported="false"
+            android:label="iOS Launcher Music"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
 
     </application>
 
