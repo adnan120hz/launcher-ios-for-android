@@ -13,6 +13,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -78,7 +80,6 @@ class CameraActions(
     val onUiStyle: (UiStyle) -> Unit,
     val onToggleNight: () -> Unit,
     val onThumbnailTap: () -> Unit,
-    val onSegera: (String) -> Unit,
     val onToggleTray: () -> Unit
 )
 
@@ -91,7 +92,7 @@ fun ShutterButton(
 ) {
     val pressScale = remember { Animatable(1f) }
     val scope = rememberCoroutineScope()
-    val recording = state.isRecording
+    val recording = state.isRecording || state.timelapseRunning
     val innerSize by animateDpAsState(
         targetValue = if (recording) 32.dp else 62.dp,
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
@@ -140,7 +141,9 @@ fun ShutterButton(
                 )
         )
         val innerColor =
-            if (state.mode == CamMode.VIDEO || recording) Color(0xFFFF3B30) else Color.White
+            if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO ||
+                state.mode == CamMode.TIME_LAPSE || recording
+            ) Color(0xFFFF3B30) else Color.White
         Box(
             Modifier
                 .size(innerSize)
@@ -234,12 +237,11 @@ fun QuickZoomButtons(
     }
 }
 
-/** Circular control inside the sheets, with label and optional SEGERA tag. */
+/** Circular control inside the sheets. Every control shown is functional. */
 @Composable
 fun ControlButton(
     label: String,
     active: Boolean,
-    segera: Boolean = false,
     onClick: () -> Unit,
     glyph: @Composable (Color) -> Unit
 ) {
@@ -261,9 +263,6 @@ fun ControlButton(
         }
         Spacer(Modifier.height(6.dp))
         Text(label, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium)
-        if (segera) {
-            Text("SEGERA", color = IosYellow, fontSize = 7.sp, fontWeight = FontWeight.Bold)
-        }
     }
 }
 
@@ -291,7 +290,31 @@ fun OptionChip(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** Sub-panel shown after tapping a sheet item (FLASH / EXPOSURE / TIMER / ASPECT). */
+/** Horizontally scrolling preset chips for FILTER / STYLES (real colour grades). */
+@Composable
+private fun GradeChips(
+    presets: List<GradePreset>,
+    selectedId: String?,
+    onSelect: (String?) -> Unit
+) {
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        OptionChip("Tidak ada", selectedId == null) { onSelect(null) }
+        presets.forEach { preset ->
+            OptionChip(preset.label, selectedId == preset.id) { onSelect(preset.id) }
+        }
+    }
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "Diterapkan nyata pada foto saat dijepret" +
+            if (android.os.Build.VERSION.SDK_INT >= 31) " dan terlihat langsung di pratinjau." else ".",
+        color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
+    )
+}
+
+/** Sub-panel shown after tapping a sheet item (FLASH / EXPOSURE / TIMER / ASPECT / FILTER / STYLES / APERTURE). */
 @Composable
 fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 14.dp)) {
@@ -300,13 +323,16 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
             SheetKind.EXPOSURE -> "EXPOSURE"
             SheetKind.TIMER -> "TIMER"
             SheetKind.ASPECT -> "ASPECT"
+            SheetKind.FILTER -> "FILTER"
+            SheetKind.STYLES -> "STYLES"
+            SheetKind.APERTURE -> "APERTURE"
             else -> ""
         }
         Text(title, color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
         when (kind) {
             SheetKind.FLASH -> {
-                if (state.mode == CamMode.VIDEO) {
+                if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OptionChip("Mati", !state.videoTorch) { if (state.videoTorch) actions.onToggleTorch() }
                         OptionChip("Nyala", state.videoTorch) { if (!state.videoTorch) actions.onToggleTorch() }
@@ -368,6 +394,54 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                     OptionChip("16:9", state.aspect == PhotoAspect.RATIO_16_9) { actions.onAspect(PhotoAspect.RATIO_16_9) }
                     OptionChip("1:1", state.aspect == PhotoAspect.SQUARE) { actions.onAspect(PhotoAspect.SQUARE) }
                 }
+            }
+            SheetKind.FILTER -> {
+                GradeChips(
+                    presets = FilterPresets,
+                    selectedId = state.filterId,
+                    onSelect = { id ->
+                        state.filterId = id
+                        if (id != null) state.styleId = null
+                        state.persistAll()
+                    }
+                )
+            }
+            SheetKind.STYLES -> {
+                GradeChips(
+                    presets = StylePresets,
+                    selectedId = state.styleId,
+                    onSelect = { id ->
+                        state.styleId = id
+                        if (id != null) state.filterId = null
+                        state.persistAll()
+                    }
+                )
+            }
+            SheetKind.APERTURE -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("ƒ", color = Color.White, fontSize = 20.sp)
+                    Slider(
+                        value = state.apertureF,
+                        onValueChange = { state.apertureF = it },
+                        onValueChangeFinished = { state.persistAll() },
+                        valueRange = 1.4f..16f,
+                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+                        colors = SliderDefaults.colors(
+                            thumbColor = IosYellow,
+                            activeTrackColor = Color.White.copy(alpha = 0.85f),
+                            inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+                        )
+                    )
+                    Text(
+                        String.format(Locale.US, "ƒ/%.1f", state.apertureF),
+                        color = IosYellow, fontSize = 15.sp, fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Mengatur kekuatan blur latar Portrait di perangkat ini (ƒ kecil = blur kuat).",
+                    color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
+                )
             }
             else -> Unit
         }

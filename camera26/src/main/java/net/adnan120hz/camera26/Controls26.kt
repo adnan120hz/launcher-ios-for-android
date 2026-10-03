@@ -86,7 +86,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                     }
                     if (!state.facingFront) {
                         val flashColor = when {
-                            state.mode == CamMode.VIDEO ->
+                            state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO ->
                                 if (state.videoTorch) IosYellow else Color.White
                             state.flash == FlashSetting.OFF -> Color.White
                             else -> IosYellow
@@ -95,26 +95,27 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                             Modifier
                                 .size(22.dp)
                                 .clickable {
-                                    if (state.mode == CamMode.VIDEO) actions.onToggleTorch()
+                                    if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) actions.onToggleTorch()
                                     else actions.onOpenSheet(SheetKind.FLASH)
                                 }
                         ) {
                             FlashGlyph(
                                 flashColor,
                                 Modifier.size(20.dp),
-                                off = state.mode != CamMode.VIDEO && state.flash == FlashSetting.OFF,
-                                auto = state.mode != CamMode.VIDEO && state.flash == FlashSetting.AUTO
+                                off = state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO && state.flash == FlashSetting.OFF,
+                                auto = state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO && state.flash == FlashSetting.AUTO
                             )
                         }
                         Spacer(Modifier.width(14.dp))
                     }
                     if (state.mode == CamMode.PHOTO) {
                         // Quick Styles access, like the iOS 26 top-right corner.
+                        // Opens the real Styles picker (colour grades at capture).
                         StylesGlyph(
-                            Color.White,
+                            if (state.styleId != null) IosYellow else Color.White,
                             Modifier
                                 .size(20.dp)
-                                .clickable { actions.onSegera("Photographic Styles") }
+                                .clickable { actions.onOpenSheet(SheetKind.STYLES) }
                         )
                         Spacer(Modifier.width(14.dp))
                     }
@@ -187,16 +188,12 @@ private fun ModeStrip26(state: CameraState, actions: CameraActions) {
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        CamMode.values().forEach { m ->
-            val available = state.modeAvailable(m)
+        // Only modes that genuinely work on this device enter the carousel.
+        CamMode.values().filter { state.modeAvailable(it) }.forEach { m ->
             val active = state.mode == m
             Text(
                 m.label,
-                color = when {
-                    active -> IosYellow
-                    available -> Color.White.copy(alpha = 0.75f)
-                    else -> Color.White.copy(alpha = 0.32f)
-                },
+                color = if (active) IosYellow else Color.White.copy(alpha = 0.75f),
                 fontSize = 12.sp,
                 fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
                 modifier = Modifier
@@ -245,7 +242,6 @@ private fun ModePill26(state: CameraState, actions: CameraActions) {
 private data class SheetItem(
     val label: String,
     val active: Boolean,
-    val segera: Boolean,
     val onClick: () -> Unit,
     val glyph: @Composable (Color) -> Unit
 )
@@ -275,7 +271,8 @@ private fun Sheet26(state: CameraState, actions: CameraActions, modifier: Modifi
         ) {
             when (state.sheet) {
                 SheetKind.GRID -> SheetGrid26(state, actions)
-                SheetKind.FLASH, SheetKind.EXPOSURE, SheetKind.TIMER, SheetKind.ASPECT -> {
+                SheetKind.FLASH, SheetKind.EXPOSURE, SheetKind.TIMER, SheetKind.ASPECT,
+                SheetKind.FILTER, SheetKind.STYLES, SheetKind.APERTURE -> {
                     Text(
                         "‹  Kontrol",
                         color = Color.White.copy(alpha = 0.65f),
@@ -300,51 +297,67 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
         PhotoAspect.SQUARE -> "1:1"
     }
     val items = mutableListOf<SheetItem>()
+    // Capability-based sheet: every item shown here does something real on
+    // this device; anything else is simply absent.
     when (state.mode) {
         CamMode.PHOTO -> {
-            items += SheetItem("FLASH", state.flash != FlashSetting.OFF, false,
+            items += SheetItem("FLASH", state.flash != FlashSetting.OFF,
                 { actions.onOpenSheet(SheetKind.FLASH) }) { c ->
                 FlashGlyph(c, Modifier.size(28.dp), off = state.flash == FlashSetting.OFF, auto = state.flash == FlashSetting.AUTO)
             }
-            items += SheetItem("LIVE", false, true, { actions.onSegera("Live Photo") }) { c ->
-                LiveGlyph(c, Modifier.size(28.dp), auto = true)
-            }
-            items += SheetItem("TIMER", state.timerSec > 0, false,
+            items += SheetItem("TIMER", state.timerSec > 0,
                 { actions.onOpenSheet(SheetKind.TIMER) }) { c -> TimerGlyph(c, Modifier.size(28.dp)) }
-            items += SheetItem("EXPOSURE", state.exposureIndex != 0, false,
+            items += SheetItem("EXPOSURE", state.exposureIndex != 0,
                 { actions.onOpenSheet(SheetKind.EXPOSURE) }) { c -> ExposureGlyph(c, Modifier.size(28.dp)) }
-            items += SheetItem("STYLES", false, true, { actions.onSegera("Photographic Styles") }) { c ->
+            items += SheetItem("STYLES", state.styleId != null,
+                { actions.onOpenSheet(SheetKind.STYLES) }) { c ->
                 StylesGlyph(c, Modifier.size(28.dp))
             }
-            items += SheetItem("FILTER", false, true, { actions.onSegera("Filter") }) { c ->
+            items += SheetItem("FILTER", state.filterId != null,
+                { actions.onOpenSheet(SheetKind.FILTER) }) { c ->
                 FilterGlyph(c, Modifier.size(28.dp))
             }
-            items += SheetItem("ASPECT", false, false,
+            items += SheetItem("ASPECT", false,
                 { actions.onOpenSheet(SheetKind.ASPECT) }) { c -> AspectGlyph(c, aspectLabel, Modifier.size(28.dp)) }
             if (state.nightExtAvailable) {
-                items += SheetItem("NIGHT MODE", state.nightOn, false,
+                items += SheetItem("NIGHT MODE", state.nightOn,
                     { actions.onToggleNight() }) { c -> NightGlyph(c, Color(0xFF4C4C50), Modifier.size(28.dp)) }
             }
         }
-        CamMode.VIDEO -> {
-            items += SheetItem("FLASH", state.videoTorch, false,
+        CamMode.VIDEO, CamMode.SLO_MO -> {
+            items += SheetItem("FLASH", state.videoTorch,
                 { actions.onToggleTorch() }) { c -> FlashGlyph(c, Modifier.size(28.dp)) }
-            items += SheetItem("EXPOSURE", state.exposureIndex != 0, false,
+            items += SheetItem("EXPOSURE", state.exposureIndex != 0,
                 { actions.onOpenSheet(SheetKind.EXPOSURE) }) { c -> ExposureGlyph(c, Modifier.size(28.dp)) }
-            items += SheetItem("ACTION", false, true, { actions.onSegera("Action Mode") }) { c ->
-                RunnerGlyph(c, Modifier.size(28.dp), off = true)
+            if (state.caps.videoStabilization) {
+                items += SheetItem("ACTION", state.actionOn,
+                    { state.actionOn = !state.actionOn }) { c ->
+                    RunnerGlyph(c, Modifier.size(28.dp), off = !state.actionOn)
+                }
             }
         }
         CamMode.PORTRAIT -> {
-            items += SheetItem("FLASH", state.flash != FlashSetting.OFF, false,
+            items += SheetItem("FLASH", state.flash != FlashSetting.OFF,
                 { actions.onOpenSheet(SheetKind.FLASH) }) { c ->
                 FlashGlyph(c, Modifier.size(28.dp), off = state.flash == FlashSetting.OFF, auto = state.flash == FlashSetting.AUTO)
             }
-            items += SheetItem("APERTURE", false, true, { actions.onSegera("Aperture") }) { c ->
-                ApertureGlyph(c, Modifier.size(28.dp))
+            // The ƒ slider only exists where it truly controls the blur:
+            // the segmentation pipeline. With an OEM BOKEH extension the
+            // strength is the OEM's, so no fake slider is shown.
+            if (state.extensionMode != androidx.camera.extensions.ExtensionMode.BOKEH) {
+                items += SheetItem("APERTURE", true,
+                    { actions.onOpenSheet(SheetKind.APERTURE) }) { c ->
+                    ApertureGlyph(c, Modifier.size(28.dp))
+                }
             }
-            items += SheetItem("EXPOSURE", state.exposureIndex != 0, false,
+            items += SheetItem("EXPOSURE", state.exposureIndex != 0,
                 { actions.onOpenSheet(SheetKind.EXPOSURE) }) { c -> ExposureGlyph(c, Modifier.size(28.dp)) }
+        }
+        CamMode.TIME_LAPSE -> {
+            items += SheetItem("EXPOSURE", state.exposureIndex != 0,
+                { actions.onOpenSheet(SheetKind.EXPOSURE) }) { c -> ExposureGlyph(c, Modifier.size(28.dp)) }
+            items += SheetItem("ASPECT", false,
+                { actions.onOpenSheet(SheetKind.ASPECT) }) { c -> AspectGlyph(c, aspectLabel, Modifier.size(28.dp)) }
         }
         else -> Unit
     }
@@ -355,7 +368,7 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
             rowItems.forEach { item ->
-                ControlButton(item.label, item.active, item.segera, item.onClick, item.glyph)
+                ControlButton(item.label, item.active, item.onClick, item.glyph)
             }
             repeat(3 - rowItems.size) { Spacer(Modifier.width(86.dp)) }
         }

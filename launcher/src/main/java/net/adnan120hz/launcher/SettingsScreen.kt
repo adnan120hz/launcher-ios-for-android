@@ -576,6 +576,13 @@ fun SettingsScreen(
                     Text(
                         text = "Cuma menyembunyikan ikon Settings bawaan HP dari daftar App Library (saat Control Center launcher dipakai). Aplikasi Settings-nya sendiri tidak diutak-atik.",
                         fontSize = 12.sp,
+                        color = Color(0xFF6E6E73)
+                    )
+                    }
+                }
+                item {
+                    Spacer(modifier = Modifier.height(20.dp))
+
                     SettingsCard(glassEnabled) {
                     SectionTitle("Dynamic Island")
                     Row(
@@ -610,7 +617,6 @@ fun SettingsScreen(
                             fontSize = 22.sp,
                             color = Color(0xFF6E6E73)
                         )
-                    }
                     }
                     }
                 }
@@ -718,7 +724,7 @@ internal fun SettingsCard(
 }
 
 @Composable
-private fun SectionTitle(text: String) {
+internal fun SectionTitle(text: String) {
     Text(
         text = text,
         fontSize = 13.sp,

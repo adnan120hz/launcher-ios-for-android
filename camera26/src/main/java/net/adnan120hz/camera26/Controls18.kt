@@ -74,7 +74,7 @@ fun Controls18(state: CameraState, actions: CameraActions) {
                     }
                     if (!state.facingFront) {
                         val flashColor = when {
-                            state.mode == CamMode.VIDEO ->
+                            state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO ->
                                 if (state.videoTorch) IosYellow else Color.White
                             state.flash == FlashSetting.OFF -> Color.White
                             else -> IosYellow
@@ -83,7 +83,7 @@ fun Controls18(state: CameraState, actions: CameraActions) {
                             Modifier
                                 .size(36.dp)
                                 .clickable {
-                                    if (state.mode == CamMode.VIDEO) actions.onToggleTorch()
+                                    if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) actions.onToggleTorch()
                                     else actions.onOpenSheet(SheetKind.FLASH)
                                 },
                             contentAlignment = Alignment.Center
@@ -91,19 +91,14 @@ fun Controls18(state: CameraState, actions: CameraActions) {
                             FlashGlyph(
                                 flashColor,
                                 Modifier.size(20.dp),
-                                off = state.mode != CamMode.VIDEO && state.flash == FlashSetting.OFF,
-                                auto = state.mode != CamMode.VIDEO && state.flash == FlashSetting.AUTO
+                                off = state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO && state.flash == FlashSetting.OFF,
+                                auto = state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO && state.flash == FlashSetting.AUTO
                             )
                         }
                     }
-                    LiveGlyph(
-                        Color.White.copy(alpha = 0.4f),
-                        Modifier.size(20.dp).clickable { actions.onSegera("Live Photo") },
-                        auto = false
-                    )
                     StylesGlyph(
-                        Color.White,
-                        Modifier.size(20.dp).clickable { actions.onSegera("Photographic Styles") }
+                        if (state.styleId != null || state.filterId != null) IosYellow else Color.White,
+                        Modifier.size(20.dp).clickable { actions.onOpenSheet(SheetKind.STYLES) }
                     )
                     Box(
                         Modifier
@@ -146,7 +141,9 @@ fun Controls18(state: CameraState, actions: CameraActions) {
 
                 AnimatedVisibility(
                     visible = state.sheet == SheetKind.FLASH || state.sheet == SheetKind.EXPOSURE ||
-                        state.sheet == SheetKind.TIMER || state.sheet == SheetKind.ASPECT,
+                        state.sheet == SheetKind.TIMER || state.sheet == SheetKind.ASPECT ||
+                        state.sheet == SheetKind.FILTER || state.sheet == SheetKind.STYLES ||
+                        state.sheet == SheetKind.APERTURE,
                     enter = slideInVertically(SheetEnterSpec) { it / 2 } + fadeIn(),
                     exit = slideOutVertically(SheetExitSpec) { it / 2 } + fadeOut()
                 ) {
@@ -195,8 +192,8 @@ private fun ModeRow18(state: CameraState, actions: CameraActions) {
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        CamMode.values().forEach { m ->
-            val available = state.modeAvailable(m)
+        // Only modes that genuinely work on this device are listed.
+        CamMode.values().filter { state.modeAvailable(it) }.forEach { m ->
             val active = state.mode == m
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -206,17 +203,10 @@ private fun ModeRow18(state: CameraState, actions: CameraActions) {
             ) {
                 Text(
                     m.label,
-                    color = when {
-                        active -> IosYellow
-                        available -> Color.White.copy(alpha = 0.8f)
-                        else -> Color.White.copy(alpha = 0.32f)
-                    },
+                    color = if (active) IosYellow else Color.White.copy(alpha = 0.8f),
                     fontSize = 12.sp,
                     fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
                 )
-                if (!available) {
-                    Text("SEGERA", color = IosYellow.copy(alpha = 0.8f), fontSize = 6.sp)
-                }
             }
         }
     }
@@ -225,7 +215,6 @@ private fun ModeRow18(state: CameraState, actions: CameraActions) {
 private data class TrayItem(
     val label: String,
     val active: Boolean,
-    val segera: Boolean,
     val onClick: () -> Unit,
     val glyph: @Composable (Color) -> Unit
 )
@@ -238,37 +227,46 @@ private fun Tray18(state: CameraState, actions: CameraActions) {
         PhotoAspect.SQUARE -> "1:1"
     }
     val items = mutableListOf<TrayItem>()
+    // Capability-based tray (iOS 18 skin): only controls that really work on
+    // this device are present — no dead items.
     items += TrayItem("FLASH",
-        if (state.mode == CamMode.VIDEO) state.videoTorch else state.flash != FlashSetting.OFF,
-        false,
-        { if (state.mode == CamMode.VIDEO) actions.onToggleTorch() else actions.onOpenSheet(SheetKind.FLASH) }
+        if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) state.videoTorch else state.flash != FlashSetting.OFF,
+        { if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) actions.onToggleTorch() else actions.onOpenSheet(SheetKind.FLASH) }
     ) { c ->
-        FlashGlyph(c, Modifier.size(24.dp), off = state.mode != CamMode.VIDEO && state.flash == FlashSetting.OFF, auto = state.mode != CamMode.VIDEO && state.flash == FlashSetting.AUTO)
+        FlashGlyph(c, Modifier.size(24.dp), off = state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO && state.flash == FlashSetting.OFF, auto = state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO && state.flash == FlashSetting.AUTO)
     }
     if (state.nightExtAvailable) {
-        items += TrayItem("NIGHT", state.nightOn, false, { actions.onToggleNight() }) { c ->
+        items += TrayItem("NIGHT", state.nightOn, { actions.onToggleNight() }) { c ->
             NightGlyph(c, Color.Black, Modifier.size(24.dp))
         }
     }
-    items += TrayItem("LIVE", false, true, { actions.onSegera("Live Photo") }) { c ->
-        LiveGlyph(c, Modifier.size(24.dp), auto = true)
-    }
-    items += TrayItem("STYLES", false, true, { actions.onSegera("Photographic Styles") }) { c ->
+    items += TrayItem("STYLES", state.styleId != null, { actions.onOpenSheet(SheetKind.STYLES) }) { c ->
         StylesGlyph(c, Modifier.size(24.dp))
     }
-    items += TrayItem("ASPECT", false, false, { actions.onOpenSheet(SheetKind.ASPECT) }) { c ->
+    items += TrayItem("ASPECT", false, { actions.onOpenSheet(SheetKind.ASPECT) }) { c ->
         AspectGlyph(c, aspectLabel, Modifier.size(24.dp))
     }
-    items += TrayItem("EXPOSURE", state.exposureIndex != 0, false, { actions.onOpenSheet(SheetKind.EXPOSURE) }) { c ->
+    items += TrayItem("EXPOSURE", state.exposureIndex != 0, { actions.onOpenSheet(SheetKind.EXPOSURE) }) { c ->
         ExposureGlyph(c, Modifier.size(24.dp))
     }
-    items += TrayItem("TIMER", state.timerSec > 0, false, { actions.onOpenSheet(SheetKind.TIMER) }) { c ->
-        TimerGlyph(c, Modifier.size(24.dp))
+    if (state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO) {
+        items += TrayItem("TIMER", state.timerSec > 0, { actions.onOpenSheet(SheetKind.TIMER) }) { c ->
+            TimerGlyph(c, Modifier.size(24.dp))
+        }
     }
-    items += TrayItem("FILTER", false, true, { actions.onSegera("Filter") }) { c ->
-        FilterGlyph(c, Modifier.size(24.dp))
+    if (state.mode == CamMode.PORTRAIT &&
+        state.extensionMode != androidx.camera.extensions.ExtensionMode.BOKEH
+    ) {
+        items += TrayItem("APERTURE", true, { actions.onOpenSheet(SheetKind.APERTURE) }) { c ->
+            ApertureGlyph(c, Modifier.size(24.dp))
+        }
     }
-    items += TrayItem("GRID", state.gridOn, false, { actions.onToggleGrid() }) { c ->
+    if (state.mode == CamMode.PHOTO) {
+        items += TrayItem("FILTER", state.filterId != null, { actions.onOpenSheet(SheetKind.FILTER) }) { c ->
+            FilterGlyph(c, Modifier.size(24.dp))
+        }
+    }
+    items += TrayItem("GRID", state.gridOn, { actions.onToggleGrid() }) { c ->
         GridGlyph(c, Modifier.size(24.dp))
     }
 
@@ -325,9 +323,6 @@ private fun Tray18(state: CameraState, actions: CameraActions) {
                     }
                     Spacer(Modifier.height(4.dp))
                     Text(item.label, color = Color.White.copy(alpha = 0.8f), fontSize = 8.sp)
-                    if (item.segera) {
-                        Text("SEGERA", color = IosYellow, fontSize = 6.sp, fontWeight = FontWeight.Bold)
-                    }
                 }
             }
         }

@@ -3,12 +3,17 @@ package net.adnan120hz.camera26
 import android.Manifest
 import android.content.ContentResolver
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import android.util.Size
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,10 +33,14 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -41,6 +50,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -54,21 +64,30 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import java.io.File
+import kotlin.coroutines.resume
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
 private fun qualityOf(name: String): Quality = when (name) {
@@ -103,8 +122,68 @@ private fun latestMediaUri(resolver: ContentResolver): Uri? {
     }
 }
 
+/** Real display size in pixels — the target the preview resolution adapts to. */
+private fun screenRealSizePx(context: Context): Pair<Int, Int> {
+    return try {
+        val wm = context.getSystemService(WindowManager::class.java)
+        if (Build.VERSION.SDK_INT >= 30 && wm != null) {
+            val b = wm.currentWindowMetrics.bounds
+            b.width() to b.height()
+        } else {
+            @Suppress("DEPRECATION")
+            val dm = context.resources.displayMetrics
+            dm.widthPixels to dm.heightPixels
+        }
+    } catch (e: Throwable) {
+        1080 to 2400
+    }
+}
+
+/** Copy a finished time-lapse MP4 from cache into MediaStore (Movies/Camera26). */
+private fun saveVideoFileToMediaStore(context: Context, file: File): Uri? {
+    return try {
+        val resolver = context.contentResolver
+        val name = "TL_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+            .format(java.util.Date()) + ".mp4"
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, name)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/Camera26")
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            ?: return null
+        resolver.openOutputStream(uri)?.use { out ->
+            file.inputStream().use { input -> input.copyTo(out) }
+        }
+        values.clear()
+        values.put(MediaStore.Video.Media.IS_PENDING, 0)
+        resolver.update(uri, values, null, null)
+        uri
+    } catch (e: Throwable) {
+        null
+    }
+}
+
 @Composable
 fun CameraScreen() {
+    // Screen-adaptive UI (core user complaint): every dp/sp dimension in the
+    // camera UI scales with the physical screen width, so small and large
+    // phones render proportionally instead of one fixed size for all.
+    // Base design width = 393 dp, scale clamped to a sane range.
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+        val scale = (maxWidth.value / 393f).coerceIn(0.82f, 1.18f)
+        val base = LocalDensity.current
+        CompositionLocalProvider(
+            LocalDensity provides Density(base.density * scale, base.fontScale)
+        ) {
+            CameraScreenContent()
+        }
+    }
+}
+
+@Composable
+private fun CameraScreenContent() {
     val context = LocalContext.current
     val lifecycleOwner = remember { context as LifecycleOwner }
     val state = remember { CameraState(context) }
@@ -115,6 +194,12 @@ fun CameraScreen() {
     val focusScale = remember { Animatable(1f) }
     var exposureAcc by remember { mutableFloatStateOf(0f) }
     var firstModeEffect by remember { mutableStateOf(true) }
+    val haptics = LocalHapticFeedback.current
+    val screenSizePx = remember { screenRealSizePx(context) }
+    val modePulse = remember { Animatable(0f) }
+    var timelapseEncoder by remember { mutableStateOf<TimelapseEncoder?>(null) }
+    var timelapseFile by remember { mutableStateOf<File?>(null) }
+    var lastZoomStopIdx by remember { mutableStateOf(-1) }
 
     val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -143,14 +228,26 @@ fun CameraScreen() {
     }
 
     fun doCapture() {
+        // iOS-style capture blink: a fast black flash, not a white one.
         scope.launch {
-            captureFlash.snapTo(0.8f)
-            captureFlash.animateTo(0f, tween(260))
+            captureFlash.snapTo(0.85f)
+            captureFlash.animateTo(0f, tween(200))
         }
+        // Portrait without an OEM BOKEH extension runs the real segmentation
+        // pipeline; the ƒ slider controls its blur strength.
+        val portraitStrength = if (
+            state.mode == CamMode.PORTRAIT &&
+            state.extensionMode != androidx.camera.extensions.ExtensionMode.BOKEH
+        ) state.apertureStrength else null
+        // FILTER / STYLES: a real colour grade baked into the captured photo.
+        val grade = if (state.mode == CamMode.PHOTO) state.activeGrade() else null
         controller.takePhoto(
             squareCrop = state.aspect == PhotoAspect.SQUARE,
+            gradeMatrix = grade?.matrix,
+            portraitStrength = portraitStrength,
             onSaved = { refreshThumb() },
-            onError = { msg -> state.toast = msg }
+            onError = { msg -> state.toast = msg },
+            onNotice = { msg -> state.toast = msg }
         )
     }
 
@@ -176,6 +273,52 @@ fun CameraScreen() {
     fun stopRecording() {
         controller.stopRecording()
         state.isRecording = false
+    }
+
+    // --- Time-lapse: real interval capture -> MP4 ---------------------------
+    suspend fun captureBitmapSuspend(): Bitmap? = suspendCancellableCoroutine { cont ->
+        controller.captureBitmap { bmp -> if (cont.isActive) cont.resume(bmp) }
+    }
+
+    fun startTimelapse() {
+        val (fw, fh) = when (state.aspect) {
+            PhotoAspect.RATIO_16_9 -> 1920 to 1080
+            PhotoAspect.RATIO_4_3 -> 1440 to 1080
+            PhotoAspect.SQUARE -> 1080 to 1080
+        }
+        val file = File(context.cacheDir, "timelapse_${System.currentTimeMillis()}.mp4")
+        val enc = TimelapseEncoder(file)
+        if (!enc.prepare(fw, fh) || !enc.start()) {
+            state.toast = "Time-Lapse tidak dapat dimulai di perangkat ini"
+            return
+        }
+        timelapseEncoder = enc
+        timelapseFile = file
+        state.timelapseFrames = 0
+        state.timelapseRunning = true
+    }
+
+    fun stopTimelapse() {
+        state.timelapseRunning = false
+        val enc = timelapseEncoder
+        val file = timelapseFile
+        timelapseEncoder = null
+        timelapseFile = null
+        scope.launch(Dispatchers.IO) {
+            val ok = enc?.stop() ?: false
+            if (ok && file != null) {
+                val uri = saveVideoFileToMediaStore(context, file)
+                try { file.delete() } catch (_: Throwable) { /* cache cleanup */ }
+                if (uri != null) {
+                    refreshThumb()
+                    state.toast = "Time-Lapse tersimpan"
+                } else {
+                    state.toast = "Time-Lapse gagal disimpan"
+                }
+            } else {
+                state.toast = "Time-Lapse gagal dibuat"
+            }
+        }
     }
 
     fun setExposureIndex(i: Int) {
@@ -231,15 +374,15 @@ fun CameraScreen() {
     }
 
     fun selectMode(m: CamMode) {
-        if (state.isRecording || m == state.mode) return
-        if (!state.modeAvailable(m)) {
-            state.toast = "Mode ${m.label} — Segera (belum didukung perangkat ini)"
-            return
-        }
+        if (state.isRecording || state.timelapseRunning || m == state.mode) return
+        // Unavailable modes are never rendered, so this is only a guard.
+        if (!state.modeAvailable(m)) return
         state.mode = m
         state.sheet = SheetKind.NONE
         state.countdown = null
-        if (m == CamMode.VIDEO && !state.micGranted && !state.micAsked) requestMic()
+        if ((m == CamMode.VIDEO || m == CamMode.SLO_MO) && !state.micGranted && !state.micAsked) {
+            requestMic()
+        }
     }
 
     fun swipeMode(dir: Int) {
@@ -256,14 +399,15 @@ fun CameraScreen() {
         onCloseSheet = { state.sheet = SheetKind.NONE },
         onShutterTap = {
             when {
+                state.timelapseRunning -> stopTimelapse()
                 state.isRecording -> stopRecording()
-                state.mode == CamMode.VIDEO -> startRecording()
-                state.modeAvailable(state.mode) -> {
+                state.mode == CamMode.TIME_LAPSE -> startTimelapse()
+                state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO -> startRecording()
+                else -> {
                     if (state.countdown != null) state.countdown = null
                     else if (state.timerSec > 0) state.countdown = state.timerSec
                     else doCapture()
                 }
-                else -> state.toast = "Mode ${state.mode.label} — Segera"
             }
         },
         onShutterHoldStart = {
@@ -279,6 +423,7 @@ fun CameraScreen() {
             }
         },
         onFlip = {
+            if (state.timelapseRunning) stopTimelapse()
             if (state.isRecording) stopRecording()
             state.facingFront = !state.facingFront
             state.desiredSessionId = null
@@ -347,7 +492,6 @@ fun CameraScreen() {
                 }
             }
         },
-        onSegera = { name -> state.toast = "$name — Segera hadir" },
         onToggleTray = { state.trayOpen = !state.trayOpen }
     )
 
@@ -429,7 +573,9 @@ fun CameraScreen() {
             state.desiredSessionId,
             extMode,
             state.aspect,
-            qualityOf(state.videoRes?.qualityName ?: "FHD")
+            qualityOf(state.videoRes?.qualityName ?: "FHD"),
+            screenSizePx.first,
+            screenSizePx.second
         )
         state.sessionBound = ok
         if (ok) {
@@ -446,8 +592,16 @@ fun CameraScreen() {
                 controller.setExposure(state.exposureIndex)
             }
             controller.setFlashMode(state.flash)
-            if (state.mode == CamMode.VIDEO) controller.setTargetFps(state.fps)
-            controller.setTorch(state.mode == CamMode.VIDEO && state.videoTorch)
+            when (state.mode) {
+                CamMode.VIDEO -> controller.setTargetFps(state.fps)
+                CamMode.SLO_MO -> controller.setTargetFps(
+                    state.caps.sloMoFps.coerceIn(60, 240)
+                )
+                else -> Unit
+            }
+            controller.setTorch(
+                (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) && state.videoTorch
+            )
             applyZoomAbsolute(state.zoomRatio)
         } else {
             state.bindError = "Tidak dapat membuka kamera"
@@ -457,8 +611,60 @@ fun CameraScreen() {
     // ------------------------------------------------------------ effects
     LaunchedEffect(state.exposureIndex) { controller.setExposure(state.exposureIndex) }
 
-    LaunchedEffect(state.mode, state.fps) {
-        if (state.mode == CamMode.VIDEO) controller.setTargetFps(state.fps)
+    LaunchedEffect(state.mode, state.fps, state.caps.sloMoFps) {
+        when (state.mode) {
+            CamMode.VIDEO -> controller.setTargetFps(state.fps)
+            CamMode.SLO_MO -> if (state.caps.sloMoFps >= 120) {
+                // Record at the highest frame rate this device exposes.
+                controller.setTargetFps(state.caps.sloMoFps.coerceIn(60, 240))
+            }
+            else -> Unit
+        }
+    }
+
+    // Action mode: real video stabilization, only ever shown when the
+    // device reports it as supported.
+    LaunchedEffect(state.mode, state.actionOn) {
+        controller.setVideoStabilization(
+            state.actionOn &&
+                (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO)
+        )
+    }
+
+    // Time-lapse frame pump: one still per interval into the encoder.
+    LaunchedEffect(state.timelapseRunning) {
+        if (!state.timelapseRunning) return@LaunchedEffect
+        while (state.timelapseRunning) {
+            val enc = timelapseEncoder
+            if (enc != null) {
+                val bmp = captureBitmapSuspend()
+                if (bmp != null && state.timelapseRunning) {
+                    enc.addFrame(bmp)
+                    state.timelapseFrames += 1
+                }
+            }
+            delay(state.timelapseIntervalMs)
+        }
+    }
+
+    // Subtle haptic tick whenever the eased zoom crosses a quick stop.
+    LaunchedEffect(state.zoomRatio) {
+        val stops = state.quickStops()
+        var nearest = -1
+        var best = Float.MAX_VALUE
+        stops.forEachIndexed { i, s ->
+            val d = abs(s - state.zoomRatio)
+            if (d < best) {
+                best = d
+                nearest = i
+            }
+        }
+        if (nearest >= 0 && best < 0.04f && nearest != lastZoomStopIdx) {
+            lastZoomStopIdx = nearest
+            if (state.dialVisible) {
+                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
+        }
     }
 
     LaunchedEffect(state.toast) {
@@ -515,6 +721,11 @@ fun CameraScreen() {
             return@LaunchedEffect
         }
         state.modeStripVisible = true
+        // iOS-like mode crossfade: a brief dim pulse over the viewfinder.
+        scope.launch {
+            modePulse.snapTo(0.30f)
+            modePulse.animateTo(0f, tween(260))
+        }
         delay(1500)
         state.modeStripVisible = false
     }

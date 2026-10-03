@@ -4,7 +4,11 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Environment
@@ -25,8 +29,7 @@ import androidx.camera.core.MeteringPoint
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.extensions.ExtensionMode
+import androidx.camera.core.resolutionselector.ResolutionStrategyimport androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.MediaStoreOutputOptions
@@ -75,6 +78,13 @@ class CameraController(private val context: Context) {
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
+
+    /** Photo post-processing (portrait segmentation, grading) off the main thread. */
+    private val processingExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    // Camera2 interop options applied together so neither overwrites the other.
+    private var fpsWanted: Int? = null
+    private var stabWanted: Boolean? = null
 
     val recordingActive: Boolean get() = recording != null
     val videoReady: Boolean get() = videoCapture != null
@@ -126,7 +136,9 @@ class CameraController(private val context: Context) {
         sessionCameraId: String?,
         extensionMode: Int,
         aspect: PhotoAspect,
-        videoQuality: Quality
+        videoQuality: Quality,
+        screenW: Int,
+        screenH: Int
     ): Boolean {
         val p = provider ?: return false
 
@@ -139,13 +151,13 @@ class CameraController(private val context: Context) {
             }
         } else base
 
-        if (bindOnce(p, lifecycleOwner, surfaceProvider, selector, extensionMode, aspect, videoQuality)) {
+        if (bindOnce(p, lifecycleOwner, surfaceProvider, selector, extensionMode, aspect, videoQuality, screenW, screenH)) {
             return true
         }
         // Fallback 1: default camera, no extension, no physical-lens filter.
         if (extensionMode != ExtensionMode.NONE || sessionCameraId != null) {
             val plain = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-            if (bindOnce(p, lifecycleOwner, surfaceProvider, plain, ExtensionMode.NONE, aspect, videoQuality)) {
+            if (bindOnce(p, lifecycleOwner, surfaceProvider, plain, ExtensionMode.NONE, aspect, videoQuality, screenW, screenH)) {
                 return true
             }
         }
@@ -154,7 +166,7 @@ class CameraController(private val context: Context) {
         val plain = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
         return bindOnce(
             p, lifecycleOwner, surfaceProvider, plain,
-            ExtensionMode.NONE, aspect, videoQuality, withVideo = false
+            ExtensionMode.NONE, aspect, videoQuality, screenW, screenH, withVideo = false
         )
     }
 
@@ -166,24 +178,34 @@ class CameraController(private val context: Context) {
         extensionMode: Int,
         aspect: PhotoAspect,
         videoQuality: Quality,
+        screenW: Int,
+        screenH: Int,
         withVideo: Boolean = true
     ): Boolean {
         return try {
             p.unbindAll()
-            // Cap the preview at ~1440p-class buffers: full-sensor previews are
-            // the main source of viewfinder lag/heat on weak devices.
-            val previewRatio =
-                if (aspect == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+            // Screen-matched preview (the user's core complaint): rank every
+            // supported preview size by how close its aspect ratio is to the
+            // DISPLAY's aspect ratio, then by closeness to the display's pixel
+            // count, so the viewfinder fills this phone's screen with the
+            // correct crop — never stretched, never a fixed one-size buffer.
+            // Slight penalty above 2560 on the long edge keeps weak GPUs cool.
+            val screenLong = maxOf(screenW, screenH).coerceAtLeast(1)
+            val screenShort = minOf(screenW, screenH).coerceAtLeast(1)
+            val screenAspect = screenLong.toDouble() / screenShort.toDouble()
+            val screenArea = screenW.toDouble() * screenH.toDouble()
             val previewSelector = ResolutionSelector.Builder()
-                .setAspectRatioStrategy(
-                    AspectRatioStrategy(previewRatio, AspectRatioStrategy.FALLBACK_RULE_AUTO)
-                )
-                .setResolutionStrategy(
-                    ResolutionStrategy(
-                        Size(1920, 1440),
-                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
-                    )
-                )
+                .setResolutionFilter { sizes, _ ->
+                    sizes.sortedBy { s ->
+                        val long = maxOf(s.width, s.height).coerceAtLeast(1)
+                        val short = minOf(s.width, s.height).coerceAtLeast(1)
+                        val aspectScore = kotlin.math.abs(kotlin.math.ln((long.toDouble() / short.toDouble()) / screenAspect))
+                        val area = s.width.toDouble() * s.height.toDouble()
+                        val areaScore = kotlin.math.abs(kotlin.math.ln(area / screenArea))
+                        val heatPenalty = if (long > 2560) 0.75 else 0.0
+                        aspectScore * 2.0 + areaScore + heatPenalty
+                    }
+                }
                 .build()
             val preview = Preview.Builder()
                 .setResolutionSelector(previewSelector)
@@ -272,16 +294,34 @@ class CameraController(private val context: Context) {
     }
 
     fun setTargetFps(fps: Int) {
+        fpsWanted = fps
+        applyCamera2Options()
+    }
+
+    /** Action mode: real video stabilization via Camera2 interop. */
+    fun setVideoStabilization(on: Boolean) {
+        stabWanted = on
+        applyCamera2Options()
+    }
+
+    private fun applyCamera2Options() {
         val cam = camera ?: return
         try {
             val control = Camera2CameraControl.from(cam.cameraControl)
-            val options = CaptureRequestOptions.Builder()
-                .setCaptureRequestOption(
+            val builder = CaptureRequestOptions.Builder()
+            fpsWanted?.let { fps ->
+                builder.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                     Range(fps, fps)
                 )
-                .build()
-            control.setCaptureRequestOptions(options)
+            }
+            stabWanted?.let { on ->
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    if (on) 1 else 0 // 1 = CONTROL_VIDEO_STABILIZATION_MODE_ON
+                )
+            }
+            control.setCaptureRequestOptions(builder.build())
         } catch (e: Throwable) { /* device clamps silently */ }
     }
 
@@ -311,23 +351,70 @@ class CameraController(private val context: Context) {
 
     fun takePhoto(
         squareCrop: Boolean,
+        gradeMatrix: FloatArray? = null,
+        portraitStrength: Float? = null,
         onSaved: (Uri) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        onNotice: (String) -> Unit = {}
     ) {
         val ic = imageCapture ?: run { onError("Kamera belum siap"); return }
         ic.takePicture(mainExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
-                try {
-                    val buffer = image.planes[0].buffer
-                    val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
-                    val rotation = image.imageInfo.rotationDegrees
-                    image.close()
-                    val out = if (squareCrop) cropToSquare(bytes, rotation) ?: bytes else bytes
-                    val uri = saveJpeg(out)
-                    if (uri != null) onSaved(uri) else onError("Gagal menyimpan foto")
+                val needsBitmap = squareCrop || gradeMatrix != null || portraitStrength != null
+                if (!needsBitmap) {
+                    // Fast path: save the captured JPEG untouched.
+                    try {
+                        val buffer = image.planes[0].buffer
+                        val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
+                        image.close()
+                        val uri = saveJpeg(bytes)
+                        if (uri != null) onSaved(uri) else onError("Gagal menyimpan foto")
+                    } catch (e: Throwable) {
+                        try { image.close() } catch (_: Throwable) { }
+                        onError("Gagal memproses foto")
+                    }
+                    return
+                }
+                val bmp = try {
+                    imageProxyToBitmap(image)
                 } catch (e: Throwable) {
-                    try { image.close() } catch (_: Throwable) { }
+                    null
+                }
+                try { image.close() } catch (_: Throwable) { }
+                if (bmp == null) {
                     onError("Gagal memproses foto")
+                    return
+                }
+                processingExecutor.execute {
+                    fun finish(processed: Bitmap, notice: String? = null) {
+                        try {
+                            val finalBmp = if (squareCrop) cropBitmapToSquare(processed) else processed
+                            val baos = ByteArrayOutputStream()
+                            finalBmp.compress(Bitmap.CompressFormat.JPEG, 95, baos)
+                            val uri = saveJpeg(baos.toByteArray())
+                            if (uri != null) {
+                                onSaved(uri)
+                                if (notice != null) onNotice(notice)
+                            } else {
+                                onError("Gagal menyimpan foto")
+                            }
+                        } catch (e: Throwable) {
+                            onError("Gagal menyimpan foto")
+                        }
+                    }
+                    when {
+                        portraitStrength != null ->
+                            PortraitProcessor.process(bmp, portraitStrength) { result ->
+                                if (result != null) {
+                                    finish(result)
+                                } else {
+                                    // Honest fallback: keep the photo, say so.
+                                    finish(bmp, "Subjek tidak terdeteksi jelas — foto disimpan tanpa blur latar")
+                                }
+                            }
+                        gradeMatrix != null -> finish(applyGrade(bmp, gradeMatrix))
+                        else -> finish(bmp)
+                    }
                 }
             }
 
@@ -337,23 +424,59 @@ class CameraController(private val context: Context) {
         })
     }
 
-    private fun cropToSquare(jpeg: ByteArray, rotationDegrees: Int): ByteArray? {
-        return try {
-            var bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return null
-            if (rotationDegrees != 0) {
-                val m = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-                bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-            }
-            val side = min(bmp.width, bmp.height)
-            val cropped = Bitmap.createBitmap(
-                bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side
-            )
-            val baos = ByteArrayOutputStream()
-            cropped.compress(Bitmap.CompressFormat.JPEG, 95, baos)
-            baos.toByteArray()
+    /** Capture one still as a rotated Bitmap (time-lapse frame source). */
+    fun captureBitmap(onResult: (Bitmap?) -> Unit) {
+        val ic = imageCapture ?: run { onResult(null); return }
+        try {
+            ic.takePicture(mainExecutor, object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    val bmp = try {
+                        imageProxyToBitmap(image)
+                    } catch (e: Throwable) {
+                        null
+                    }
+                    try { image.close() } catch (_: Throwable) { }
+                    onResult(bmp)
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    onResult(null)
+                }
+            })
         } catch (e: Throwable) {
-            null
+            onResult(null)
         }
+    }
+
+    private fun imageProxyToBitmap(image: ImageProxy): Bitmap {
+        val buffer = image.planes[0].buffer
+        val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
+        var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?: throw IllegalStateException("decode failed")
+        val rotation = image.imageInfo.rotationDegrees
+        if (rotation != 0) {
+            val m = Matrix().apply { postRotate(rotation.toFloat()) }
+            bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        }
+        return bmp
+    }
+
+    /** Apply a real colour grade (FILTER / STYLES) to the captured photo. */
+    private fun applyGrade(src: Bitmap, matrix: FloatArray): Bitmap {
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val paint = Paint().apply {
+            colorFilter = ColorMatrixColorFilter(ColorMatrix(matrix))
+        }
+        canvas.drawBitmap(src, 0f, 0f, paint)
+        return out
+    }
+
+    private fun cropBitmapToSquare(bmp: Bitmap): Bitmap {
+        val side = min(bmp.width, bmp.height)
+        return Bitmap.createBitmap(
+            bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side
+        )
     }
 
     private fun saveJpeg(bytes: ByteArray): Uri? {

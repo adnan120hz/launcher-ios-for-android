@@ -27,7 +27,7 @@ enum class FlashSetting { OFF, AUTO, ON }
 
 enum class PhotoAspect { RATIO_4_3, RATIO_16_9, SQUARE }
 
-enum class SheetKind { NONE, GRID, FLASH, EXPOSURE, TIMER, ASPECT, RESOLUTION }
+enum class SheetKind { NONE, GRID, FLASH, EXPOSURE, TIMER, ASPECT, RESOLUTION, FILTER, STYLES, APERTURE }
 
 data class VideoResOption(val label: String, val qualityName: String)
 
@@ -109,10 +109,40 @@ class CameraState(context: Context) {
     var micAsked by mutableStateOf(false)
     var bindError by mutableStateOf<String?>(null)
 
+    // Real, device-gated features (no dead controls anywhere in the UI):
+    // FILTER / STYLES are real colour grades applied at capture; APERTURE
+    // drives the portrait background-blur strength; ACTION is video
+    // stabilization; TIME-LAPSE runs an interval-capture encoder.
+    var filterId by mutableStateOf<String?>(prefs.getString("filter_id", null))
+    var styleId by mutableStateOf<String?>(prefs.getString("style_id", null))
+    var apertureF by mutableStateOf(prefs.getFloat("aperture_f", 2.8f))
+    var actionOn by mutableStateOf(false)
+    var timelapseRunning by mutableStateOf(false)
+    var timelapseFrames by mutableStateOf(0)
+    val timelapseIntervalMs: Long = 1000L
+
+    /** The active colour grade: a chosen filter wins over a style, like iOS. */
+    fun activeGrade(): GradePreset? =
+        filterId?.let { id -> FilterPresets.firstOrNull { it.id == id } }
+            ?: styleId?.let { id -> StylePresets.firstOrNull { it.id == id } }
+
+    /** Portrait blur strength 0..1 derived from the ƒ slider (wide ƒ = strong blur). */
+    val apertureStrength: Float
+        get() = ((16f - apertureF) / (16f - 1.4f)).coerceIn(0.05f, 1f)
+
+    /**
+     * Capability-based mode list: every mode that appears in the carousel is
+     * genuinely functional on THIS device. Modes with no reliable public-API
+     * path (Cinematic, Pano) never appear at all.
+     */
     fun modeAvailable(m: CamMode): Boolean = when (m) {
         CamMode.PHOTO, CamMode.VIDEO -> true
-        CamMode.PORTRAIT -> bokehExtAvailable && !facingFront
-        else -> false
+        // BOKEH extension when the OEM provides it, otherwise the real
+        // ML Kit segmentation portrait pipeline.
+        CamMode.PORTRAIT -> bokehExtAvailable || PortraitFallback.available
+        CamMode.TIME_LAPSE -> caps.timelapseAvailable
+        CamMode.SLO_MO -> caps.sloMoFps >= 120
+        CamMode.CINEMATIC, CamMode.PANO -> false
     }
 
     /** ExtensionMode to bind with, or NONE. Portrait=Bokeh, Night=Night extension. */
@@ -187,6 +217,9 @@ class CameraState(context: Context) {
             .putBoolean("grid", gridOn)
             .putInt("fps", fps)
             .putString("video_quality", videoRes?.qualityName)
+            .putString("filter_id", filterId)
+            .putString("style_id", styleId)
+            .putFloat("aperture_f", apertureF)
             .apply()
     }
 }

@@ -3,6 +3,9 @@ package net.adnan120hz.camera26
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import android.os.Build
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -24,7 +27,13 @@ data class DeviceCaps(
     val logicalMinZoomRatio: Float = 1f, // < 1 means the logical camera fuses an ultrawide
     val fpsOptions: List<Int> = listOf(30),
     val maxFps: Int = 30,
-    val hasFlashUnit: Boolean = false
+    val hasFlashUnit: Boolean = false,
+    /** Highest high-speed (slow-motion) fps the device exposes; 0 = none. */
+    val sloMoFps: Int = 0,
+    /** True when an AVC encoder usable for the time-lapse pipeline exists. */
+    val timelapseAvailable: Boolean = false,
+    /** True when CONTROL_VIDEO_STABILIZATION_MODE_ON is supported (Action mode). */
+    val videoStabilization: Boolean = false
 )
 
 fun formatRatioLabel(ratio: Float): String =
@@ -115,12 +124,45 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
     }
     val tier1 = logical.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
 
+    // Slow-motion: real high-speed ranges live on the stream configuration map,
+    // not in the AE ranges (those usually top out at 60).
+    var sloMax = 0
+    try {
+        val scm = logical.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        scm?.highSpeedVideoFpsRanges?.forEach { r -> if (r.upper > sloMax) sloMax = r.upper }
+    } catch (e: Throwable) { /* device without high-speed map */ }
+
+    val stabModes = logical.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+    val stab = stabModes?.any { it == 1 } == true // 1 = CONTROL_VIDEO_STABILIZATION_MODE_ON
+
     return DeviceCaps(
         backSessions = sortedSessions,
         baseEqMm = baseEq,
         logicalMinZoomRatio = minZoom,
         fpsOptions = if (fpsOpts.isEmpty()) listOf(30) else fpsOpts,
         maxFps = fpsRanges?.maxOfOrNull { it.upper } ?: 30,
-        hasFlashUnit = tier1
+        hasFlashUnit = tier1,
+        sloMoFps = sloMax,
+        timelapseAvailable = avcEncoderAvailable(),
+        videoStabilization = stab
     )
+}
+
+/** True when an AVC hardware/software encoder with a byte-buffer YUV format exists. */
+private fun avcEncoderAvailable(): Boolean {
+    return try {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { ci ->
+            if (!ci.isEncoder) return@any false
+            val type = ci.supportedTypes.firstOrNull {
+                it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true)
+            } ?: return@any false
+            val formats = ci.getCapabilitiesForType(type).colorFormats
+            formats.any {
+                it == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar ||
+                    it == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
+            }
+        }
+    } catch (e: Throwable) {
+        false
+    }
 }

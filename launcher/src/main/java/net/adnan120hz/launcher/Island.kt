@@ -595,15 +595,15 @@ fun IslandPillContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Mengisi daya · $charging%",
+                        text = "Mengisi daya · $chargingPct%",
                         fontSize = (13 * fontK).sp,
                         color = Color.White
                     )
                 }
             }
             IslandMode.TIMER -> {
-                val mm = timerLeft / 60
-                val ss = timerLeft % 60
+                val mm = timerLeftSec / 60
+                val ss = timerLeftSec % 60
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "Timer %d:%02d".format(mm, ss),
