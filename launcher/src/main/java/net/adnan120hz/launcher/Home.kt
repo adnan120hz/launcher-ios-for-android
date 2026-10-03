@@ -4,6 +4,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.view.View
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -787,7 +788,7 @@ fun HomeScreen(
                     pendingCustomPkg = app.packageName
                     menuApp = null
                     iconPicker.launch(
-                        ActivityResultContracts.PickVisualMediaRequest(
+                        PickVisualMediaRequest(
                             ActivityResultContracts.PickVisualMedia.ImageOnly
                         )
                     )
