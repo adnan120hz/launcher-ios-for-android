@@ -1,7 +1,7 @@
 package net.adnan120hz.camera26
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
@@ -52,9 +52,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Shared iOS-style spring specs: sheets/trays/cards always bounce, never tween stiffly. */
-val SheetEnterSpec: AnimationSpec<IntOffset> =
+val SheetEnterSpec: FiniteAnimationSpec<IntOffset> =
     spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMediumLow)
-val SheetExitSpec: AnimationSpec<IntOffset> =
+val SheetExitSpec: FiniteAnimationSpec<IntOffset> =
     spring(dampingRatio = 0.95f, stiffness = Spring.StiffnessMedium)
 
 class CameraActions(
