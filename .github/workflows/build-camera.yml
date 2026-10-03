@@ -1,0 +1,40 @@
+name: Build Kamera iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'camera26/**'
+      - 'settings.gradle.kts'
+      - 'build.gradle.kts'
+      - 'gradle/**'
+      - 'gradlew'
+      - 'gradlew.bat'
+      - '.github/workflows/build-camera.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Build Kamera iOS debug APK
+        run: ./gradlew :camera26:assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: mv camera26/build/outputs/apk/debug/camera26-debug.apk Kamera-iOS.apk
+
+      - name: Upload Kamera iOS APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kamera-iOS
+          path: Kamera-iOS.apk

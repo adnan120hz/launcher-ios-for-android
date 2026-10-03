@@ -1,0 +1,40 @@
+name: Build Launcher iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'launcher/**'
+      - 'settings.gradle.kts'
+      - 'build.gradle.kts'
+      - 'gradle/**'
+      - 'gradlew'
+      - 'gradlew.bat'
+      - '.github/workflows/build-launcher.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Build Launcher iOS debug APK
+        run: ./gradlew :launcher:assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: mv launcher/build/outputs/apk/debug/launcher-debug.apk Launcher-iOS.apk
+
+      - name: Upload Launcher iOS APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Launcher-iOS
+          path: Launcher-iOS.apk
