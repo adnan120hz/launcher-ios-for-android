@@ -2,31 +2,18 @@ package net.adnan120hz.launcher
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
@@ -35,7 +22,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,14 +29,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,43 +43,10 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-data class AppEntry(
-    val label: String,
-    val packageName: String,
-    val icon: Drawable
-)
-
 // ---- Simple persistent flags (skeleton; moves to DataStore in a later phase) ----
 private const val PREFS_NAME = "launcher_prefs"
 private const val KEY_ONBOARDING_DONE = "onboarding_done"
 private const val KEY_DYNAMIC_ISLAND_UNLOCKED = "dynamic_island_unlocked"
-
-private fun loadInstalledApps(context: Context): List<AppEntry> {
-    val pm = context.packageManager
-    val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-    val resolved = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
-    return resolved
-        .mapNotNull { info ->
-            val label = info.loadLabel(pm)?.toString() ?: return@mapNotNull null
-            AppEntry(
-                label = label,
-                packageName = info.activityInfo.packageName,
-                icon = info.loadIcon(pm)
-            )
-        }
-        .distinctBy { it.packageName }
-        .sortedBy { it.label.lowercase() }
-}
-
-private fun Drawable.toBitmapSafe(size: Int = 96): Bitmap {
-    val w = if (intrinsicWidth > 0) intrinsicWidth else size
-    val h = if (intrinsicHeight > 0) intrinsicHeight else size
-    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    setBounds(0, 0, w, h)
-    draw(canvas)
-    return bitmap
-}
 
 @Composable
 fun LauncherApp() {
@@ -249,122 +198,4 @@ fun OnboardingFlow(
             }
         }
     }
-}
-
-@Composable
-fun HomeScreen(dynamicIslandUnlocked: Boolean) {
-    val context = LocalContext.current
-    val apps by produceState<List<AppEntry>>(initialValue = emptyList()) {
-        value = withContext(Dispatchers.IO) { loadInstalledApps(context) }
-    }
-    val dockApps = apps.take(4)
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color(0xFF8EC5FC), Color(0xFFE0C3FC))
-                )
-            )
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(4),
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(
-                    start = 16.dp,
-                    end = 16.dp,
-                    top = 48.dp,
-                    bottom = 16.dp
-                ),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                items(apps) { app ->
-                    AppIconCell(app = app) {
-                        val launch = context.packageManager
-                            .getLaunchIntentForPackage(app.packageName)
-                        if (launch != null) context.startActivity(launch)
-                    }
-                }
-            }
-
-            if (!dynamicIslandUnlocked) {
-                Text(
-                    text = "Dynamic Island iOS 26 UI masih terkunci (follow TikTok buat buka)",
-                    fontSize = 11.sp,
-                    color = Color.White.copy(alpha = 0.85f),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 8.dp)
-                )
-            }
-
-            // Dock (4 slots) — Liquid Glass style placeholder
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 16.dp)
-                    .clip(RoundedCornerShape(30.dp))
-                    .background(Color.White.copy(alpha = 0.35f))
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                dockApps.forEach { app ->
-                    AppDockIcon(app = app) {
-                        val launch = context.packageManager
-                            .getLaunchIntentForPackage(app.packageName)
-                        if (launch != null) context.startActivity(launch)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AppIconCell(app: AppEntry, onClick: () -> Unit) {
-    val iconBitmap = remember(app.packageName) { app.icon.toBitmapSafe().asImageBitmap() }
-    Column(
-        modifier = Modifier
-            .clip(RoundedCornerShape(14.dp))
-            .clickable { onClick() }
-            .padding(vertical = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Image(
-            bitmap = iconBitmap,
-            contentDescription = app.label,
-            modifier = Modifier
-                .size(58.dp)
-                .clip(RoundedCornerShape(14.dp))
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = app.label,
-            fontSize = 11.sp,
-            color = Color.White,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center
-        )
-    }
-}
-
-@Composable
-private fun AppDockIcon(app: AppEntry, onClick: () -> Unit) {
-    val iconBitmap = remember(app.packageName) { app.icon.toBitmapSafe().asImageBitmap() }
-    Image(
-        bitmap = iconBitmap,
-        contentDescription = app.label,
-        modifier = Modifier
-            .size(58.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .clickable { onClick() }
-    )
 }

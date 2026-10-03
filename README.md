@@ -45,9 +45,32 @@ spacing, aligned grids and rows. No cluttered or uneven screens.
 
 ## Status
 
+**Phase 1: core launcher (v0.2.0).** Ready to test on a device:
+
+- iOS-style paged home screen (4x5 grid per page, real installed-app icons
+  and labels); tap an icon to launch with a scale-up animation from the
+  icon's position
+- Liquid Glass dock with 4 slots. On Android 12+ (API 31) the dock backdrop
+  is a real RenderEffect blur of the wallpaper layer; on older versions it
+  falls back to a translucent gradient. Dock apps are user-chosen and
+  persistent (first-run defaults: Phone, Messages/Browser, Camera — this
+  project's Camera iOS 26 app when installed — Gallery)
+- App Library as the page after the last home page: all apps grouped A-Z
+  with a search field that filters in real time. The "Search" pill above
+  the dock jumps to it
+- Launcher settings (App Library entry, or long-press the home screen):
+  icon style iOS 26 / iOS 18 (corner radius + shadow for now; redrawn icon
+  packs arrive in Phase 3), Liquid Glass on/off (off = solid iOS-18 style,
+  easier on battery), performance tier Entry/Mid/Flagship (blur radius,
+  Entry also drops icon shadows), dock app picker + reset
+- Onboarding with the TikTok follow gate from Phase 0 is unchanged
+
+Still spec for later phases: Control Center (iOS 18 / iOS 26 styles),
+working Dynamic Island overlay, lock screen, motion-blur fluid animations,
+redrawn icon packs, real CameraX camera. Features land phase by phase.
+
 Phase 0: project foundation. The launcher skeleton (onboarding, installed-app
 grid, 4-slot glass dock) and the camera UI skeleton build in CI on every push.
-Features above land phase by phase.
 
 ## Building
 
