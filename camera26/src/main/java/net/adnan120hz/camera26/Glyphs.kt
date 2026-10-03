@@ -14,6 +14,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -26,8 +27,22 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 val IosYellow = Color(0xFFFFD60A)
-val GlassPanel = Color(0xE62C2C2E)
-val GlassButton = Color(0xFF3A3A3C)
+
+// ---------------------------------------------------------------------------
+// Liquid Glass material (iOS 26 ONLY). Translucent light-tinted gray with a
+// vertical sheen: the live preview faintly shows through, a bright rim and a
+// soft top highlight sell real glass. iOS 18 UI must never use these tokens —
+// it renders flat opaque black instead (see Controls18).
+// ---------------------------------------------------------------------------
+val GlassPanelBrush = Brush.verticalGradient(
+    listOf(Color(0xDB636366), Color(0xC9404043))
+)
+val GlassPillBrush = Brush.verticalGradient(
+    listOf(Color(0xC957575B), Color(0xB03C3C40))
+)
+val GlassRim = Color.White.copy(alpha = 0.32f)
+val GlassSheen = Color.White.copy(alpha = 0.20f)
+val GlassButton = Color(0xF238383B)
 
 @Composable
 fun FlashGlyph(

@@ -42,8 +42,8 @@ private fun GlassPill(modifier: Modifier = Modifier, content: @Composable RowSco
     Row(
         modifier
             .clip(RoundedCornerShape(50))
-            .background(Color.Black.copy(alpha = 0.42f))
-            .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(50))
+            .background(GlassPillBrush)
+            .border(1.dp, GlassRim, RoundedCornerShape(50))
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         content = content
@@ -81,7 +81,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                 }
                 GlassPill {
                     if (state.nightOn && !state.facingFront) {
-                        NightGlyph(IosYellow, Color.Black, Modifier.size(19.dp))
+                        NightGlyph(IosYellow, Color(0xFF4C4C50), Modifier.size(19.dp))
                         Spacer(Modifier.width(12.dp))
                     }
                     if (!state.facingFront) {
@@ -108,6 +108,16 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                         }
                         Spacer(Modifier.width(14.dp))
                     }
+                    if (state.mode == CamMode.PHOTO) {
+                        // Quick Styles access, like the iOS 26 top-right corner.
+                        StylesGlyph(
+                            Color.White,
+                            Modifier
+                                .size(20.dp)
+                                .clickable { actions.onSegera("Photographic Styles") }
+                        )
+                        Spacer(Modifier.width(14.dp))
+                    }
                     SixDotsGlyph(
                         Color.White,
                         Modifier
@@ -119,8 +129,8 @@ fun Controls26(state: CameraState, actions: CameraActions) {
 
             AnimatedVisibility(
                 visible = state.sheet == SheetKind.RESOLUTION,
-                enter = slideInVertically(spring(dampingRatio = Spring.DampingRatioMediumBouncy)) { -it } + fadeIn(),
-                exit = slideOutVertically(tween(180)) { -it } + fadeOut()
+                enter = slideInVertically(SheetEnterSpec) { -it } + fadeIn(),
+                exit = slideOutVertically(SheetExitSpec) { -it } + fadeOut()
             ) {
                 ResolutionCard(
                     state, actions,
@@ -132,7 +142,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
 
             AnimatedVisibility(
                 visible = state.modeStripVisible,
-                enter = fadeIn(tween(150)),
+                enter = slideInVertically(SheetEnterSpec) { it / 3 } + fadeIn(),
                 exit = fadeOut(tween(250))
             ) {
                 ModeStrip26(state, actions)
@@ -202,8 +212,8 @@ private fun ModePill26(state: CameraState, actions: CameraActions) {
     Row(
         Modifier
             .clip(RoundedCornerShape(50))
-            .background(Color.Black.copy(alpha = 0.45f))
-            .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(50))
+            .background(GlassPillBrush)
+            .border(1.dp, GlassRim, RoundedCornerShape(50))
             .padding(4.dp)
     ) {
         listOf(CamMode.VIDEO, CamMode.PHOTO).forEach { m ->
@@ -212,7 +222,7 @@ private fun ModePill26(state: CameraState, actions: CameraActions) {
                 Modifier
                     .clip(RoundedCornerShape(50))
                     .background(
-                        if (active) Color.White.copy(alpha = 0.20f) else Color.Transparent
+                        if (active) Color.White.copy(alpha = 0.30f) else Color.Transparent
                     )
                     .clickable {
                         if (active) actions.onOpenSheet(SheetKind.GRID)
@@ -246,18 +256,16 @@ private fun Sheet26(state: CameraState, actions: CameraActions, modifier: Modifi
     AnimatedVisibility(
         visible = visible,
         modifier = modifier,
-        enter = slideInVertically(
-            spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-        ) { it } + fadeIn(),
-        exit = slideOutVertically(tween(200)) { it } + fadeOut()
+        enter = slideInVertically(SheetEnterSpec) { it } + fadeIn(),
+        exit = slideOutVertically(SheetExitSpec) { it } + fadeOut()
     ) {
         Column(
             Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp, vertical = 10.dp)
-                .clip(RoundedCornerShape(30.dp))
-                .background(GlassPanel)
-                .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(30.dp))
+                .clip(RoundedCornerShape(34.dp))
+                .background(GlassPanelBrush)
+                .border(1.dp, GlassRim, RoundedCornerShape(34.dp))
                 .pointerInput(Unit) {
                     detectVerticalDragGestures { _, dragAmount ->
                         if (dragAmount > 42f) actions.onCloseSheet()
@@ -315,7 +323,7 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
                 { actions.onOpenSheet(SheetKind.ASPECT) }) { c -> AspectGlyph(c, aspectLabel, Modifier.size(28.dp)) }
             if (state.nightExtAvailable) {
                 items += SheetItem("NIGHT MODE", state.nightOn, false,
-                    { actions.onToggleNight() }) { c -> NightGlyph(c, GlassPanel, Modifier.size(28.dp)) }
+                    { actions.onToggleNight() }) { c -> NightGlyph(c, Color(0xFF4C4C50), Modifier.size(28.dp)) }
             }
         }
         CamMode.VIDEO -> {

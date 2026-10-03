@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import androidx.camera.extensions.ExtensionMode
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
@@ -64,9 +65,13 @@ class CameraState(context: Context) {
     var exposureStep by mutableStateOf(0f)
     val exposureSupported: Boolean get() = exposureMax > exposureMin
 
-    // Zoom.
-    var zoomRatio by mutableStateOf(1f)          // displayed absolute ratio (target)
+    // Zoom. zoomRatio is the *applied/displayed* ratio, driven frame-by-frame
+    // by the zoom animator; gestures only move zoomTarget and the animator
+    // chases it with a spring (smooth zoom, never jumps).
+    var zoomRatio by mutableStateOf(1f)          // displayed absolute ratio (applied)
+    var zoomTarget by mutableFloatStateOf(1f)   // where the user asked to go
     var desiredSessionId by mutableStateOf<String?>(null) // null = logical camera
+    var sessionBound by mutableStateOf(false)   // controller bound to desired session
     var currentSessionRatio by mutableStateOf(1f)
     var sessionMinZoom by mutableStateOf(1f)
     var sessionMaxZoom by mutableStateOf(10f)

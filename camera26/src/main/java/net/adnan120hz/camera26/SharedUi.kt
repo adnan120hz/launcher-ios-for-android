@@ -1,6 +1,7 @@
 package net.adnan120hz.camera26
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
@@ -41,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
@@ -48,6 +50,12 @@ import kotlin.math.abs
 import kotlin.math.exp
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+
+/** Shared iOS-style spring specs: sheets/trays/cards always bounce, never tween stiffly. */
+val SheetEnterSpec: AnimationSpec<IntOffset> =
+    spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMediumLow)
+val SheetExitSpec: AnimationSpec<IntOffset> =
+    spring(dampingRatio = 0.95f, stiffness = Spring.StiffnessMedium)
 
 class CameraActions(
     val onModeSelect: (CamMode) -> Unit,
@@ -194,14 +202,21 @@ fun QuickZoomButtons(
     modifier: Modifier = Modifier
 ) {
     val stops = state.quickStops()
+    val glass = state.uiStyle == UiStyle.IOS26
     Row(modifier, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         stops.forEach { stop ->
             val active = abs(state.zoomRatio - stop) < 0.07f
+            val base = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+            val styled = if (glass) {
+                base.background(GlassPillBrush)
+                    .border(1.dp, if (active) IosYellow.copy(alpha = 0.55f) else GlassRim, CircleShape)
+            } else {
+                base.background(Color.Black.copy(alpha = if (active) 0.62f else 0.42f))
+            }
             Box(
-                Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = if (active) 0.62f else 0.42f))
+                styled
                     .combinedClickable(
                         onClick = { actions.onZoomTo(stop) },
                         onLongClick = { actions.onDialShow(); actions.onZoomTo(stop) }
@@ -359,15 +374,23 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
     }
 }
 
-/** Top card: RESOLUTION (HD/4K) + FRAME RATE (24/30/60) from real device caps. */
+/** Top card: RESOLUTION (HD/4K) + FRAME RATE (24/30/60) from real device caps.
+ *  [flat] = iOS 18 skin: solid dark card, NO Liquid Glass. Default = iOS 26 glass. */
 @Composable
-fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifier = Modifier) {
-    Column(
+fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifier = Modifier, flat: Boolean = false) {
+    val cardMod = if (flat) {
         modifier
-            .clip(RoundedCornerShape(22.dp))
-            .background(GlassPanel)
-            .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(22.dp))
-            .padding(horizontal = 20.dp, vertical = 14.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xF51E1E20))
+            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(14.dp))
+    } else {
+        modifier
+            .clip(RoundedCornerShape(24.dp))
+            .background(GlassPanelBrush)
+            .border(1.dp, GlassRim, RoundedCornerShape(24.dp))
+    }
+    Column(
+        cardMod.padding(horizontal = 20.dp, vertical = 14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -442,7 +465,7 @@ fun ZoomDial(
     var acc by remember { mutableFloatStateOf(0f) }
     val gesture = Modifier.pointerInput(Unit) {
         detectDragGestures(
-            onDragStart = { startRatio = state.zoomRatio; acc = 0f },
+            onDragStart = { startRatio = state.zoomTarget; acc = 0f },
             onDragEnd = { onDone() },
             onDragCancel = { onDone() },
             onDrag = { change, drag ->

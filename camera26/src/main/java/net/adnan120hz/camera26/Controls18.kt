@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -47,16 +49,21 @@ fun Controls18(state: CameraState, actions: CameraActions) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (state.mode == CamMode.VIDEO && !state.isRecording) {
-                    Text(
-                        "${state.videoRes?.label ?: "HD"} • ${state.fps}",
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.clickable { actions.onOpenSheet(SheetKind.RESOLUTION) }
-                    )
-                } else {
-                    Spacer(Modifier.width(1.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // BUG FIX: the way back to the iOS 26 UI used to exist ONLY
+                    // as the last item of the horizontally scrolling tray, so
+                    // users got stuck on iOS 18. This switch is always visible.
+                    UiSwitchPill18 { actions.onUiStyle(UiStyle.IOS26) }
+                    if (state.mode == CamMode.VIDEO && !state.isRecording) {
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            "${state.videoRes?.label ?: "HD"} • ${state.fps}",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.clickable { actions.onOpenSheet(SheetKind.RESOLUTION) }
+                        )
+                    }
                 }
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
@@ -74,11 +81,12 @@ fun Controls18(state: CameraState, actions: CameraActions) {
                         }
                         Box(
                             Modifier
-                                .size(22.dp)
+                                .size(36.dp)
                                 .clickable {
                                     if (state.mode == CamMode.VIDEO) actions.onToggleTorch()
                                     else actions.onOpenSheet(SheetKind.FLASH)
-                                }
+                                },
+                            contentAlignment = Alignment.Center
                         ) {
                             FlashGlyph(
                                 flashColor,
@@ -97,32 +105,41 @@ fun Controls18(state: CameraState, actions: CameraActions) {
                         Color.White,
                         Modifier.size(20.dp).clickable { actions.onSegera("Photographic Styles") }
                     )
-                    ChevronGlyph(
-                        Color.White,
-                        Modifier.size(20.dp).clickable { actions.onToggleTray() },
-                        down = state.trayOpen
-                    )
+                    Box(
+                        Modifier
+                            .size(40.dp)
+                            .clickable { actions.onToggleTray() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        ChevronGlyph(Color.White, Modifier.size(20.dp), down = state.trayOpen)
+                    }
                 }
             }
 
             AnimatedVisibility(
                 visible = state.sheet == SheetKind.RESOLUTION,
-                enter = slideInVertically(tween(200)) { -it } + fadeIn(),
-                exit = slideOutVertically(tween(160)) { -it } + fadeOut()
+                enter = slideInVertically(SheetEnterSpec) { -it } + fadeIn(),
+                exit = slideOutVertically(SheetExitSpec) { -it } + fadeOut()
             ) {
                 ResolutionCard(
                     state, actions,
-                    Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                    Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    flat = true // iOS 18: flat black card, no Liquid Glass
                 )
             }
 
             Spacer(Modifier.weight(1f))
 
-            Column(Modifier.fillMaxWidth()) {
+            // iOS 18 bottom control bar: FLAT black (no Liquid Glass anywhere).
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.55f))
+            ) {
                 AnimatedVisibility(
                     visible = state.trayOpen,
-                    enter = slideInVertically(tween(200)) { it } + fadeIn(),
-                    exit = slideOutVertically(tween(160)) { it } + fadeOut()
+                    enter = slideInVertically(SheetEnterSpec) { it } + fadeIn(),
+                    exit = slideOutVertically(SheetExitSpec) { it } + fadeOut()
                 ) {
                     Tray18(state, actions)
                 }
@@ -130,8 +147,8 @@ fun Controls18(state: CameraState, actions: CameraActions) {
                 AnimatedVisibility(
                     visible = state.sheet == SheetKind.FLASH || state.sheet == SheetKind.EXPOSURE ||
                         state.sheet == SheetKind.TIMER || state.sheet == SheetKind.ASPECT,
-                    enter = fadeIn(tween(150)),
-                    exit = fadeOut(tween(150))
+                    enter = slideInVertically(SheetEnterSpec) { it / 2 } + fadeIn(),
+                    exit = slideOutVertically(SheetExitSpec) { it / 2 } + fadeOut()
                 ) {
                     Column(
                         Modifier
@@ -268,6 +285,27 @@ private fun Tray18(state: CameraState, actions: CameraActions) {
                 .padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            // UI style switch is FIRST in the tray (it used to be the last
+            // item, effectively unreachable -> users got stuck on iOS 18).
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .width(72.dp)
+                    .clickable { actions.onUiStyle(UiStyle.IOS26) }
+                    .padding(vertical = 2.dp)
+            ) {
+                Box(
+                    Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.13f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("26", color = IosYellow, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("KE iOS 26", color = IosYellow.copy(alpha = 0.9f), fontSize = 8.sp, fontWeight = FontWeight.Bold)
+            }
             items.forEach { item ->
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -292,26 +330,24 @@ private fun Tray18(state: CameraState, actions: CameraActions) {
                     }
                 }
             }
-            // UI style switch lives at the end of the tray.
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .width(72.dp)
-                    .clickable { actions.onUiStyle(UiStyle.IOS26) }
-                    .padding(vertical = 2.dp)
-            ) {
-                Box(
-                    Modifier
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.10f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("26", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                }
-                Spacer(Modifier.height(4.dp))
-                Text("KE iOS 26", color = Color.White.copy(alpha = 0.8f), fontSize = 8.sp)
-            }
         }
+    }
+}
+
+/** Always-visible flat pill in the iOS 18 top bar: one tap back to iOS 26 UI. */
+@Composable
+private fun UiSwitchPill18(onClick: () -> Unit) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color(0xFF2C2C2E))
+            .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(50))
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("iOS 26", color = IosYellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.width(5.dp))
+        Text("UI ›", color = Color.White.copy(alpha = 0.65f), fontSize = 10.sp)
     }
 }

@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Range
+import android.util.Size
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.CaptureRequestOptions
@@ -24,10 +25,12 @@ import androidx.camera.core.MeteringPoint
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
@@ -139,12 +142,20 @@ class CameraController(private val context: Context) {
         if (bindOnce(p, lifecycleOwner, surfaceProvider, selector, extensionMode, aspect, videoQuality)) {
             return true
         }
-        // Fallback: default camera, no extension, no physical-lens filter.
+        // Fallback 1: default camera, no extension, no physical-lens filter.
         if (extensionMode != ExtensionMode.NONE || sessionCameraId != null) {
             val plain = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-            return bindOnce(p, lifecycleOwner, surfaceProvider, plain, ExtensionMode.NONE, aspect, videoQuality)
+            if (bindOnce(p, lifecycleOwner, surfaceProvider, plain, ExtensionMode.NONE, aspect, videoQuality)) {
+                return true
+            }
         }
-        return false
+        // Fallback 2 (last resort): preview + photo only, so the viewfinder
+        // never stays dead on an exotic device. Video reports "not ready".
+        val plain = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+        return bindOnce(
+            p, lifecycleOwner, surfaceProvider, plain,
+            ExtensionMode.NONE, aspect, videoQuality, withVideo = false
+        )
     }
 
     private fun bindOnce(
@@ -154,11 +165,29 @@ class CameraController(private val context: Context) {
         selector: CameraSelector,
         extensionMode: Int,
         aspect: PhotoAspect,
-        videoQuality: Quality
+        videoQuality: Quality,
+        withVideo: Boolean = true
     ): Boolean {
         return try {
             p.unbindAll()
-            val preview = Preview.Builder().build()
+            // Cap the preview at ~1440p-class buffers: full-sensor previews are
+            // the main source of viewfinder lag/heat on weak devices.
+            val previewRatio =
+                if (aspect == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+            val previewSelector = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(
+                    AspectRatioStrategy(previewRatio, AspectRatioStrategy.FALLBACK_RULE_AUTO)
+                )
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(1920, 1440),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                    )
+                )
+                .build()
+            val preview = Preview.Builder()
+                .setResolutionSelector(previewSelector)
+                .build()
             preview.setSurfaceProvider(surfaceProvider)
 
             val ratio = if (aspect == PhotoAspect.RATIO_16_9) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
@@ -172,13 +201,19 @@ class CameraController(private val context: Context) {
                 .setResolutionSelector(resSelector)
                 .build()
 
-            camera = if (extensionMode != ExtensionMode.NONE) {
-                // CameraX Extensions support Preview + ImageCapture only.
+            camera = if (extensionMode != ExtensionMode.NONE || !withVideo) {
+                // CameraX Extensions support Preview + ImageCapture only; the
+                // photo-only fallback also skips VideoCapture.
                 videoCapture = null
                 p.bindToLifecycle(lifecycleOwner, selector, preview, ic)
             } else {
                 val recorder = Recorder.Builder()
-                    .setQualitySelector(QualitySelector.from(videoQuality))
+                    .setQualitySelector(
+                        QualitySelector.from(
+                            videoQuality,
+                            FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                        )
+                    )
                     .build()
                 val vc = VideoCapture.withOutput(recorder)
                 videoCapture = vc

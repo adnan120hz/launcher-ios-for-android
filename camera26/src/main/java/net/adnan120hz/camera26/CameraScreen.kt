@@ -18,6 +18,7 @@ import androidx.camera.video.Quality
 import androidx.camera.video.Recorder
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -68,6 +69,7 @@ import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private fun qualityOf(name: String): Quality = when (name) {
     "UHD" -> Quality.UHD
@@ -180,24 +182,51 @@ fun CameraScreen() {
         state.exposureIndex = i.coerceIn(state.exposureMin, state.exposureMax)
     }
 
-    fun setZoom(target: Float) {
+    // --- Smooth zoom -------------------------------------------------------
+    // Gestures never touch the camera directly: they only move the target.
+    // The animator chases the target with an under-damped spring and applies
+    // the eased value frame-by-frame, so pinch and dial zooms glide (and the
+    // displayed ratio/label follows the same eased value).
+    fun setZoomTarget(t: Float) {
+        state.zoomTarget = if (state.facingFront) {
+            t.coerceIn(state.sessionMinZoom, state.sessionMaxZoom)
+        } else {
+            t.coerceIn(
+                state.dialMin.coerceAtLeast(0.1f),
+                state.dialMax.coerceAtMost(100f)
+            )
+        }
+    }
+
+    fun applyZoomAbsolute(v: Float) {
         if (state.facingFront) {
-            val d = target.coerceIn(state.sessionMinZoom, state.sessionMaxZoom)
-            controller.applyZoomRatio(d)
-            state.zoomRatio = d
+            controller.applyZoomRatio(
+                v.coerceIn(state.sessionMinZoom, state.sessionMaxZoom)
+            )
             return
         }
-        val t = target.coerceIn(0.2f, 100f)
-        val session = state.sessionFor(t)
-        state.zoomRatio = t
+        val session = state.sessionFor(v)
         if (session.cameraId != state.desiredSessionId) {
+            // Crossing into another physical lens: ask for a rebind; the bind
+            // effect re-applies the current value once the new session is live.
             state.desiredSessionId = session.cameraId
             state.currentSessionRatio = session.ratio
-        } else {
-            val digital = (t / session.ratio)
+            state.sessionBound = false
+        } else if (state.sessionBound) {
+            val digital = (v / session.ratio)
                 .coerceIn(state.sessionMinZoom.coerceAtLeast(0.05f), state.sessionMaxZoom)
             controller.applyZoomRatio(digital)
-            state.zoomRatio = session.ratio * digital
+        }
+    }
+
+    val zoomAnim = remember { Animatable(1f) }
+    LaunchedEffect(state.zoomTarget) {
+        zoomAnim.animateTo(
+            state.zoomTarget,
+            spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessLow)
+        ) {
+            state.zoomRatio = value
+            applyZoomAbsolute(value)
         }
     }
 
@@ -254,13 +283,14 @@ fun CameraScreen() {
             state.facingFront = !state.facingFront
             state.desiredSessionId = null
             state.currentSessionRatio = 1f
-            state.zoomRatio = 1f
+            state.sessionBound = false
+            state.zoomTarget = 1f // animator glides the displayed zoom back to 1x
             state.videoTorch = false
             state.focusPoint = null
             state.sheet = SheetKind.NONE
             state.countdown = null
         },
-        onZoomTo = { target -> setZoom(target) },
+        onZoomTo = { target -> setZoomTarget(target) },
         onDialShow = { state.dialVisible = true },
         onFlash = { f ->
             state.flash = f
@@ -323,7 +353,8 @@ fun CameraScreen() {
 
     // ------------------------------------------------------------ init
     LaunchedEffect(Unit) {
-        state.caps = computeCaps(context)
+        // CameraManager capability reads run off the main thread.
+        state.caps = withContext(Dispatchers.Default) { computeCaps(context) }
         state.micGranted = ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
@@ -400,6 +431,7 @@ fun CameraScreen() {
             state.aspect,
             qualityOf(state.videoRes?.qualityName ?: "FHD")
         )
+        state.sessionBound = ok
         if (ok) {
             state.bindError = null
             controller.readZoomState()?.let { (mn, mx) ->
@@ -416,7 +448,7 @@ fun CameraScreen() {
             controller.setFlashMode(state.flash)
             if (state.mode == CamMode.VIDEO) controller.setTargetFps(state.fps)
             controller.setTorch(state.mode == CamMode.VIDEO && state.videoTorch)
-            setZoom(state.zoomRatio)
+            applyZoomAbsolute(state.zoomRatio)
         } else {
             state.bindError = "Tidak dapat membuka kamera"
         }
@@ -503,7 +535,8 @@ fun CameraScreen() {
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
-                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    // PERFORMANCE (SurfaceView) = less viewfinder latency & heat.
+                    implementationMode = PreviewView.ImplementationMode.PERFORMANCE
                     scaleType = PreviewView.ScaleType.FILL_CENTER
                 }
             },
@@ -531,9 +564,9 @@ fun CameraScreen() {
                 }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, _, zoomChange, _ ->
-                        if (!state.isRecording && state.sheet == SheetKind.NONE) {
+                        if (!state.isRecording && state.sheet == SheetKind.NONE && !state.trayOpen) {
                             state.dialVisible = true
-                            setZoom(state.zoomRatio * zoomChange)
+                            setZoomTarget(state.zoomTarget * zoomChange)
                         }
                     }
                 }
@@ -543,7 +576,8 @@ fun CameraScreen() {
                         onDragStart = { total = 0f },
                         onHorizontalDrag = { _, drag -> total += drag },
                         onDragEnd = {
-                            if (abs(total) > 70f && state.sheet == SheetKind.NONE) {
+                            // Never hijack iOS 18 tray scrolling into a mode swipe.
+                            if (abs(total) > 70f && state.sheet == SheetKind.NONE && !state.trayOpen) {
                                 swipeMode(if (total < 0) 1 else -1)
                             }
                         },
