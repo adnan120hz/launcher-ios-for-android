@@ -300,7 +300,16 @@ final class CameraViewModel: ObservableObject {
         if isRecording { stopVideoRecording() }
         facingFront.toggle()
         engine.configure(position: facingFront ? .front : .back) { [weak self] ok in
-            guard let self, ok else { return }
+            guard let self else { return }
+            guard ok else {
+                // The engine swaps inputs only once the new camera is
+                // known-good, so the previous camera is still live —
+                // restore the flag to match it and say what happened
+                // instead of leaving a silent black preview.
+                self.facingFront.toggle()
+                self.showToast("Gagal berpindah kamera — kamera sebelumnya tetap aktif.")
+                return
+            }
             // Formats belong to a device: re-pick from the new camera's
             // real list before anything applies the old pick to it.
             self.selectedFormat = self.engine.capabilities.videoFormats.first { $0.label == "HD" }
@@ -520,7 +529,7 @@ final class CameraViewModel: ObservableObject {
     }
 
     private func setVideoThumbnail(_ url: URL) {
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 120, height: 120)
@@ -557,11 +566,18 @@ final class CameraViewModel: ObservableObject {
         timelapseRunning = false
         let frames = timelapseImages
         timelapseImages = []
-        guard frames.count > 1 else { return }
-        VideoTools.assembleTimeLapse(images: frames) { url in
-            if let url { PhotoSaver.saveVideo(url) { _ in } }
+        guard frames.count > 1 else {
+            showToast("Time-lapse butuh lebih dari satu frame — rekam sedikit lebih lama.")
+            return
         }
-        showBanner("TIME-LAPSE SELESAI")
+        VideoTools.assembleTimeLapse(images: frames) { url in
+            if let url {
+                PhotoSaver.saveVideo(url) { _ in }
+                showBanner("TIME-LAPSE SELESAI")
+            } else {
+                showToast("Time-lapse gagal dirangkai — coba lagi.")
+            }
+        }
     }
 
     // MARK: - Panorama (guided sweep; translation stitch — see PanoStitcher)

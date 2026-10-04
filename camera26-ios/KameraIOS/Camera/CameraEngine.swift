@@ -41,7 +41,7 @@ final class CameraEngine: NSObject {
     private(set) var baseFocalMM: Double = 24
     var stabilizationMode: AVCaptureVideoStabilizationMode = .auto
 
-    private var photoCompletion: ((AVCapturePhoto?, Error?) -> Void)?
+    private var photoCompletions: [Int64: (AVCapturePhoto?, Error?)] = [:]
     private var recordCompletion: ((URL?, Error?) -> Void)?
     private var movieOutputAttached = false
     private var audioInput: AVCaptureDeviceInput?
@@ -83,7 +83,6 @@ final class CameraEngine: NSObject {
     }
 
     private func configureOnQueue(position: AVCaptureDevice.Position) -> Bool {
-        self.position = position
         session.beginConfiguration()
         defer { session.commitConfiguration() }
 
@@ -93,17 +92,19 @@ final class CameraEngine: NSObject {
             session.sessionPreset = .inputPriority
         }
 
+        guard let dev = bestDevice(for: position),
+              let newInput = try? AVCaptureDeviceInput(device: dev),
+              session.canAddInput(newInput) else { return false }
+        // Swap only once the replacement is known-good. The previous order
+        // removed the old input first, so any failure here left the
+        // session input-less — a dead, silent preview after a flip.
         if let old = input {
             session.removeInput(old)
-            input = nil
         }
-        guard let dev = bestDevice(for: position),
-              let newInput = try? AVCaptureDeviceInput(device: dev) else { return false }
+        session.addInput(newInput)
+        input = newInput
         device = dev
-        if session.canAddInput(newInput) {
-            session.addInput(newInput)
-            input = newInput
-        } else { return false }
+        self.position = position
 
         if !session.outputs.contains(photoOutput), session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
@@ -445,7 +446,11 @@ final class CameraEngine: NSObject {
             if wantDepth, self.photoOutput.isPortraitEffectsMatteDeliverySupported {
                 settings.isPortraitEffectsMatteDeliveryEnabled = true
             }
-            self.photoCompletion = completion
+            // Completions are keyed by the settings' unique ID so
+            // overlapping captures (time-lapse ticking once a second,
+            // pano steps, a user shutter press) each deliver to their own
+            // caller instead of overwriting one shared slot.
+            self.photoCompletions[settings.uniqueID] = completion
             self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
     }
@@ -480,8 +485,7 @@ final class CameraEngine: NSObject {
 
 extension CameraEngine: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        let completion = photoCompletion
-        photoCompletion = nil
+        let completion = photoCompletions.removeValue(forKey: photo.resolvedSettings.uniqueID)
         DispatchQueue.main.async { completion?(photo, error) }
     }
 }

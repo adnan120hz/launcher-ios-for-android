@@ -14,8 +14,14 @@ enum VideoTools {
         }
         let out = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("timelapse-\(UUID().uuidString).mp4")
-        let width = Int(first.size.width)
-        let height = Int(first.size.height)
+        // H.264 requires even dimensions; stills can come back odd-sized,
+        // which made the writer fail and the time-lapse vanish silently.
+        let width = Int(first.size.width) / 2 * 2
+        let height = Int(first.size.height) / 2 * 2
+        guard width >= 2, height >= 2 else {
+            completion(nil)
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let writer = try AVAssetWriter(outputURL: out, fileType: .mp4)
