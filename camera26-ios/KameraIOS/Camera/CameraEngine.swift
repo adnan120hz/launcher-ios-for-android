@@ -309,7 +309,9 @@ final class CameraEngine: NSObject {
         guard let dev = device, dev.isLowLightBoostSupported else { return }
         do {
             try dev.lockForConfiguration()
-            dev.isLowLightBoostEnabled = on
+            // `isLowLightBoostEnabled` is get-only; the settable switch is
+            // the automatic boost (verified against the SDK in CI).
+            dev.automaticallyEnablesLowLightBoostWhenAvailable = on
             dev.unlockForConfiguration()
         } catch { /* ignore */ }
     }
@@ -323,7 +325,7 @@ final class CameraEngine: NSObject {
             try dev.lockForConfiguration()
             if animated {
                 dev.cancelVideoZoomRamp()
-                dev.ramp(toVideoZoomFactor: CGFloat(clamped), rate: 6.0)
+                dev.ramp(toVideoZoomFactor: CGFloat(clamped), withRate: 6.0)
             } else {
                 dev.videoZoomFactor = CGFloat(clamped)
             }
