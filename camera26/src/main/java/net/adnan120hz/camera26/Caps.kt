@@ -44,18 +44,9 @@ data class DeviceCaps(
     val oisAvailable: Boolean = false,
     /** True when the device has a real gyroscope (software gyro-EIS input). */
     val gyroAvailable: Boolean = false,
-    /**
-     * True when a fused orientation sensor (accelerometer + magnetometer)
-     * exists: the "virtual gyro" source for software EIS on phones that
-     * ship without a gyroscope (most entry-level devices).
-     */
-    val rotationVectorAvailable: Boolean = false,
-    /** Performance class used to scale EIS stream size / glass cost. */
+    /** Performance class used to scale glass cost / preview effects. */
     val perfTier: PerfTier = PerfTier.FLAGSHIP
-) {
-    /** Any motion source the software-EIS pipeline can consume. */
-    val motionAvailable: Boolean get() = gyroAvailable || rotationVectorAvailable
-}
+)
 
 fun formatRatioLabel(ratio: Float): String =
     if (ratio < 0.95f) {
@@ -150,7 +141,12 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
     var sloMax = 0
     try {
         val scm = logical.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        scm?.highSpeedVideoFpsRanges?.forEach { r -> if (r.upper > sloMax) sloMax = r.upper }
+        // Only trust the ranges when the HAL also publishes high-speed
+        // sizes: some HALs list ranges without any usable size, and
+        // offering SLO-MO there would be a fake feature.
+        if (scm != null && !scm.highSpeedVideoSizes.isNullOrEmpty()) {
+            scm.highSpeedVideoFpsRanges?.forEach { r -> if (r.upper > sloMax) sloMax = r.upper }
+        }
     } catch (e: Throwable) { /* device without high-speed map */ }
 
     val stabModes = logical.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
@@ -160,10 +156,10 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
     val oisModes = logical.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
     val ois = oisModes?.any { it == 1 } == true
 
-    // Motion sensors for the software gyro-EIS pipeline: a real gyroscope
-    // is best; the fused rotation-vector sensor (accelerometer +
-    // magnetometer) is the fallback that keeps software EIS alive on
-    // entry-level phones that ship without a gyroscope.
+    // Motion sensor for the software gyro-EIS pipeline (restored 80dcd84
+    // basis, 2.0.0): a real gyroscope only. The fix7/8 fused
+    // rotation-vector "virtual gyro" takeover is removed by user order —
+    // gyro-less devices use hardware stabilisation behind ACTION instead.
     val sensorManager = try {
         context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager
     } catch (e: Throwable) {
@@ -171,11 +167,6 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
     }
     val gyro = try {
         sensorManager?.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) != null
-    } catch (e: Throwable) {
-        false
-    }
-    val rotVec = try {
-        sensorManager?.getDefaultSensor(android.hardware.Sensor.TYPE_ROTATION_VECTOR) != null
     } catch (e: Throwable) {
         false
     }
@@ -209,7 +200,6 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
         videoStabilization = stab,
         oisAvailable = ois,
         gyroAvailable = gyro,
-        rotationVectorAvailable = rotVec,
         perfTier = perfTier
     )
 }

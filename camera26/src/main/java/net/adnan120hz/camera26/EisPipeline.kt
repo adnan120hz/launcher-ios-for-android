@@ -60,7 +60,7 @@ import kotlin.math.abs
  * The warp rotates each frame by the gyro trajectory correction
  * (trajectory-smoothed orientation vs the frame's raw orientation,
  * gain-scaled in GyroTracker) and crops adaptively: the crop follows the
- * measured shake amplitude (6% when the phone is nearly still, up to 18%
+ * measured shake amplitude (8% when the phone is nearly still, up to 18%
  * in heavy shake — see EisTuning) so quality is not thrown away on calm
  * frames, and crop changes are smoothed so they never read as zoom
  * pumping. The sensor stream supersamples (up to 2560x1440) into the
@@ -73,17 +73,20 @@ import kotlin.math.abs
  * reports through [Listener.onFailed] so the caller can fall back to the
  * hardware-stabilization / plain CameraX path — recording never hard-crashes.
  */
-class EisPipeline(
-    private val context: Context,
-    private val perfTier: PerfTier = PerfTier.FLAGSHIP
-) {
+class EisPipeline(private val context: Context) {
 
     interface Listener {
         fun onStarted()
-
-        /** First warped frame was actually presented to the preview. */
-        fun onFirstFrame() {}
         fun onFailed(reason: String)
+
+        /**
+         * First warped frame actually presented to the preview surface.
+         * Safety net only (2.0.0): the caller keeps the viewfinder gated
+         * until this fires, and a watchdog that sees no frame fails the
+         * pipeline honestly instead of leaving a black preview. It never
+         * changes which stabilisation path runs.
+         */
+        fun onFirstFrame() {}
         fun onRecordingSaved(uri: Uri)
         fun onRecordingFailed()
     }
@@ -98,28 +101,14 @@ class EisPipeline(
     private val gyro = GyroTracker(context)
     val gyroAvailable: Boolean get() = gyro.available
 
-    /** Which motion source feeds the warp (real gyroscope or virtual). */
-    val motionSource: MotionSource get() = gyro.source
-
-    /** Long-side cap for the sensor stream, scaled by performance tier. */
-    private val streamLongCap: Int = when (perfTier) {
-        PerfTier.ENTRY -> 1280
-        PerfTier.MID -> 1920
-        PerfTier.FLAGSHIP -> 2560
-    }
-
-    /** GL unsharp: off on entry-tier (saves a pass + encoder artefacts). */
-    private val sharpAmount: Float =
-        if (perfTier == PerfTier.ENTRY) 0f else EisTuning.UNSHARP_AMOUNT
-
     // -- pipeline thread -----------------------------------------------------
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
 
     // -- camera ---------------------------------------------------------------
-    @Volatile private var cameraDevice: CameraDevice? = null
-    @Volatile private var session: CameraCaptureSession? = null
-    @Volatile private var cameraSurface: Surface? = null
+    private var cameraDevice: CameraDevice? = null
+    private var session: CameraCaptureSession? = null
+    private var cameraSurface: Surface? = null
     private var frameSize = Size(1920, 1080)
     private var sensorOrientation = 0
     private var displayRotationDeg = 0
@@ -155,6 +144,18 @@ class EisPipeline(
     private var shakeAmpEmaDeg = EisTuning.SHAKE_LOW_DEG
     private var cropCurrent = EisTuning.CROP_INITIAL
 
+    // -- first-frame safety net (2.0.0, behaviour-neutral) ---------------------
+    private val framesPresented = AtomicLong(0)
+    private val firstFrameNotified = AtomicBoolean(false)
+
+    // -- zoom-aware correction gain (2.0.0 item 6) ------------------------------
+    // Smoothed zoom velocity (log-ratio per second). While the user zooms,
+    // the correction gain eases down so stabilisation never fights the zoom
+    // move (the "kaku" complaint); at rest the full old gain returns.
+    @Volatile private var zoomRateSmooth = 0f
+    private var lastZoomValue = 1f
+    private var lastZoomTimeNs = 0L
+
     // -- encoder --------------------------------------------------------------
     private var videoCodec: MediaCodec? = null
     private var encoderInputSurface: Surface? = null
@@ -182,14 +183,6 @@ class EisPipeline(
     // not also fire onRecordingFailed (the caller reports the fallback).
     private var suppressRecordResult = false
 
-    // -- start safety (fix8) ----------------------------------------------------
-    /** Frames actually presented to the preview surface since start. */
-    private val framesPresented = AtomicLong(0)
-    private val firstFrameNotified = AtomicBoolean(false)
-    /** Failure is torn down + reported at most once per start. */
-    private val startFailed = AtomicBoolean(false)
-    @Volatile private var stopRequested = false
-
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val quadBuffer: ByteBuffer by lazy {
@@ -209,79 +202,37 @@ class EisPipeline(
         previewH = previewHeight
         frontFacing = front
         displayRotationDeg = currentDisplayRotationDeg()
-        framesPresented.set(0L)
-        firstFrameNotified.set(false)
-        startFailed.set(false)
-        stopRequested = false
         val t = HandlerThread("camera26-eis")
         t.start()
         thread = t
         handler = Handler(t.looper)
-        // fix8: the blocking camera bring-up (latch waits for openCamera /
-        // createCaptureSession) runs on this starter thread, never on the
-        // pipeline thread that receives the Camera2 callbacks. Both the
-        // first release and fix7 waited on the callback thread itself, so
-        // a slow HAL turned start-up into stacked 5-second timeouts while
-        // CameraX was already unbound — a black viewfinder with nothing
-        // producing frames.
-        val starter = object : Runnable {
-            override fun run() {
-                try {
-                    startCameraOnThread(front)
-                    if (stopRequested) {
-                        handler?.post { cleanupOnThread() }
-                        return
+        handler?.post {
+            try {
+                startOnThread(front)
+                running = true
+                mainHandler.post { listener?.onStarted() }
+                // Watchdog (2.0.0 safety net): a pipeline that configures
+                // "successfully" but never presents a frame would otherwise
+                // sit on a black viewfinder forever. Fail honestly after a
+                // generous grace period; the caller falls back to the
+                // CameraX path. Never fires on a healthy pipeline.
+                handler?.postDelayed({
+                    if (running && framesPresented.get() == 0L) {
+                        mainHandler.post {
+                            listener?.onFailed(
+                                "Pipeline EIS tidak menampilkan frame di perangkat ini"
+                            )
+                        }
                     }
-                    running = true
-                    mainHandler.post { listener?.onStarted() }
-                    scheduleFrameWatchdog()
-                } catch (e: Throwable) {
-                    failStart(e)
-                }
+                }, FRAME_WATCHDOG_MS)
+            } catch (e: Throwable) {
+                cleanupOnThread()
+                mainHandler.post { listener?.onFailed(e.message ?: "EIS tidak dapat dimulai") }
             }
         }
-        Thread(starter, "camera26-eis-start").start()
-    }
-
-    /** Start failure: tear down once, report once, never while stopping. */
-    private fun failStart(e: Throwable) {
-        if (!startFailed.compareAndSet(false, true)) return
-        running = false
-        handler?.post { cleanupOnThread() }
-        if (!stopRequested) {
-            mainHandler.post {
-                listener?.onFailed(e.message ?: "EIS tidak dapat dimulai")
-            }
-        }
-    }
-
-    /**
-     * Frame watchdog: [FRAME_WATCHDOG_MS] after a "successful" start the
-     * pipeline must have presented at least one real frame. If it claimed
-     * the camera but produced nothing, tear it down so the caller restores
-     * the CameraX preview — a black viewfinder must never persist.
-     */
-    private fun scheduleFrameWatchdog() {
-        val h = handler ?: return
-        h.postDelayed({
-            if (running && !stopRequested && framesPresented.get() == 0L &&
-                startFailed.compareAndSet(false, true)
-            ) {
-                running = false
-                try {
-                    cleanupOnThread()
-                } catch (e: Throwable) { /* best effort */ }
-                mainHandler.post {
-                    listener?.onFailed(
-                        "Stabilisasi software tidak berjalan di perangkat ini — rekam biasa"
-                    )
-                }
-            }
-        }, FRAME_WATCHDOG_MS)
     }
 
     fun stop() {
-        stopRequested = true
         val h = handler
         if (h == null) {
             gyro.stop()
@@ -318,7 +269,25 @@ class EisPipeline(
     }
 
     fun setZoom(ratio: Float) {
-        zoomRatio = ratio.coerceIn(1f, 8f)
+        val v = ratio.coerceIn(1f, 8f)
+        // Track zoom velocity for the adaptive correction gain (item 6):
+        // log-ratio change per second, lightly smoothed.
+        val now = System.nanoTime()
+        if (lastZoomTimeNs > 0L) {
+            val dt = (now - lastZoomTimeNs) / 1e9f
+            if (dt >= 0.005f) {
+                val rate = abs(
+                    kotlin.math.ln((v / lastZoomValue.coerceAtLeast(0.05f)).toDouble())
+                ).toFloat() / dt
+                zoomRateSmooth += (rate - zoomRateSmooth) * 0.35f
+                lastZoomTimeNs = now
+                lastZoomValue = v
+            }
+        } else {
+            lastZoomTimeNs = now
+            lastZoomValue = v
+        }
+        zoomRatio = v
     }
 
     fun setTorch(on: Boolean) {
@@ -345,8 +314,8 @@ class EisPipeline(
         }
     }
 
-    private fun startCameraOnThread(front: Boolean) {
-        if (!gyro.available) throw IllegalStateException("Sensor gerak tidak tersedia")
+    private fun startOnThread(front: Boolean) {
+        if (!gyro.available) throw IllegalStateException("Gyroscope tidak tersedia")
         val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val targetFacing = if (front) {
             CameraCharacteristics.LENS_FACING_FRONT
@@ -385,34 +354,9 @@ class EisPipeline(
         prevCorrectionTsNs = 0L
         shakeAmpEmaDeg = EisTuning.SHAKE_LOW_DEG
         cropCurrent = EisTuning.CROP_INITIAL
-
-        // GL init first (baseline order of the first release), but executed
-        // on the pipeline thread so the EGL context stays confined there;
-        // this starter thread only waits for it.
-        val pipelineHandler = handler
-            ?: throw IllegalStateException("Pipeline thread tidak ada")
-        val glReady = CountDownLatch(1)
-        var glError: Throwable? = null
-        pipelineHandler.post {
-            try {
-                initGl()
-            } catch (e: Throwable) {
-                glError = e
-            }
-            glReady.countDown()
-        }
-        if (!glReady.await(5, TimeUnit.SECONDS)) {
-            throw IllegalStateException("GL tidak siap")
-        }
-        glError?.let { throw it }
-        if (stopRequested) throw IllegalStateException("Start dibatalkan")
+        initGl()
 
         val st = surfaceTexture ?: throw IllegalStateException("SurfaceTexture gagal")
-        // ONE Surface over the SurfaceTexture for the whole session — the
-        // first release did exactly this. The fix7 staged loop re-wrapped
-        // the texture in a new Surface per attempt and could bind the
-        // session to a superseded/released surface (frames draining into a
-        // dead queue while onStarted had already fired).
         cameraSurface = Surface(st)
 
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) !=
@@ -445,9 +389,6 @@ class EisPipeline(
         openError?.let { throw it }
         val device = cameraDevice ?: throw IllegalStateException("Kamera gagal dibuka")
 
-        if (stopRequested) throw IllegalStateException("Start dibatalkan")
-
-        // ONE capture session on the one surface (first-release baseline).
         val sessionLatch = CountDownLatch(1)
         var sessionError: Throwable? = null
         val surface = cameraSurface ?: throw IllegalStateException("Surface kamera tidak ada")
@@ -471,24 +412,20 @@ class EisPipeline(
             throw IllegalStateException("Timeout sesi kamera")
         }
         sessionError?.let { throw it }
-        if (stopRequested) throw IllegalStateException("Start dibatalkan")
         applyRepeatingRequest()
     }
 
     private fun pickFrameSize(sizes: List<Size>): Size {
         if (sizes.isEmpty()) return Size(1280, 720)
         // Supersample for quality: the GL warp downscales the sensor
-        // stream onto the <=1080p encoder, so the largest stream hands
-        // the stabilizer real pixels to crop into instead of upscaling a
-        // cropped 1080p frame back up afterwards. The cap follows the
-        // performance tier so entry-level GPUs are not drowned in pixels.
+        // stream onto the <=1080p encoder, so the largest stream up to
+        // 2560x1440 hands the stabilizer real pixels to crop into instead
+        // of upscaling a cropped 1080p frame back up afterwards.
         val wide = sizes.filter {
             abs(it.width.toFloat() / it.height - 16f / 9f) < 0.06f
         }
         val pool = if (wide.isNotEmpty()) wide else sizes
-        val capped = pool.filter {
-            it.width <= streamLongCap && it.height <= streamLongCap
-        }
+        val capped = pool.filter { it.width <= 2560 && it.height <= 1440 }
         return if (capped.isNotEmpty()) {
             capped.maxByOrNull { it.width.toLong() * it.height }!!
         } else {
@@ -581,71 +518,29 @@ class EisPipeline(
         // frame must match that orientation: portrait-held phones get a
         // portrait MP4 (long side still capped at 1920, short at 1080).
         val quarterTurn = ((sensorOrientation - displayRotationDeg) % 180 + 180) % 180 != 0
-        val longSide = minOf(maxOf(outWidth, outHeight), 1920)
-        val shortSide = minOf(minOf(outWidth, outHeight), 1080)
-
-        // Staged encoder init: entry-level encoders sometimes reject the
-        // requested size/bitrate combination — step down through smaller,
-        // cheaper configurations before conceding to the fallback path.
-        val dimAttempts = ArrayList<Pair<Int, Int>>()
-        fun dims(ls: Int, ss: Int) {
-            val w = if (quarterTurn) ss else ls
-            val h = if (quarterTurn) ls else ss
-            val aligned = Pair(
-                (w / 16 * 16).coerceAtLeast(176),
-                (h / 16 * 16).coerceAtLeast(176)
-            )
-            if (aligned !in dimAttempts) dimAttempts += aligned
-        }
-        dims(longSide, shortSide)
-        dims(minOf(longSide, 1280), minOf(shortSide, 720))
-        dims(minOf(longSide, 854), minOf(shortSide, 480))
-        var codec: MediaCodec? = null
-        var lastEncError: Throwable? = null
-        for ((w, h) in dimAttempts) {
-            var c: MediaCodec? = null
-            try {
-                val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
-                format.setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-                )
-                val pixels = w.toLong() * h.toLong()
-                format.setInteger(
-                    MediaFormat.KEY_BIT_RATE,
-                    (pixels * EisTuning.BITRATE_PER_PIXEL)
-                        .coerceIn(EisTuning.BITRATE_MIN.toLong(), EisTuning.BITRATE_MAX.toLong())
-                        .toInt()
-                )
-                format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-                format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-                c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-                c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                encoderInputSurface = c.createInputSurface()
-                c.start()
-                codec = c
-                break
-            } catch (e: Throwable) {
-                lastEncError = e
-                // fix8: a half-configured codec from a failed attempt must
-                // be released, not leaked (native encoder instances are
-                // scarce on entry-level HALs).
-                try {
-                    c?.stop()
-                } catch (t: Throwable) { /* ignore */ }
-                try {
-                    c?.release()
-                } catch (t: Throwable) { /* ignore */ }
-                try {
-                    encoderInputSurface?.release()
-                } catch (t: Throwable) { /* ignore */ }
-                encoderInputSurface = null
-            }
-        }
+        var longSide = minOf(maxOf(outWidth, outHeight), 1920)
+        var shortSide = minOf(minOf(outWidth, outHeight), 1080)
+        val w = if (quarterTurn) shortSide else longSide
+        val hgt = if (quarterTurn) longSide else shortSide
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, hgt)
+        format.setInteger(
+            MediaFormat.KEY_COLOR_FORMAT,
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+        )
+        val pixels = w.toLong() * hgt.toLong()
+        format.setInteger(
+            MediaFormat.KEY_BIT_RATE,
+            (pixels * EisTuning.BITRATE_PER_PIXEL)
+                .coerceIn(EisTuning.BITRATE_MIN.toLong(), EisTuning.BITRATE_MAX.toLong())
+                .toInt()
+        )
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        encoderInputSurface = codec.createInputSurface()
+        codec.start()
         videoCodec = codec
-            ?: throw IllegalStateException(
-                "Encoder video tidak dapat dibuat: ${lastEncError?.message}"
-            )
 
         // Encoder EGL window surface sharing the pipeline GL context.
         val display = eglDisplay ?: throw IllegalStateException("EGL belum siap")
@@ -1145,8 +1040,24 @@ class EisPipeline(
                     q = GyroTracker.slerp(prev, q, maxStep / ang)
                 }
             }
+            // Zoom-aware gain (2.0.0 item 6): while the user is zooming,
+            // ease the correction toward identity so stabilisation never
+            // fights the zoom move (the "kaku" feel); as the zoom settles
+            // the velocity decays (τ≈0.4 s) and the full correction
+            // returns. The warp below already scales focal length by the
+            // live zoom, so zooming stays geometrically consistent.
+            val corrDtNs = if (prevCorrectionTsNs > 0L) {
+                (frameTsNs - prevCorrectionTsNs).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+            zoomRateSmooth *= kotlin.math.exp(-corrDtNs / 4e8).toFloat()
             prevCorrectionQuat = q
             prevCorrectionTsNs = frameTsNs
+            val gainScale = 1f / (1f + zoomRateSmooth * 1.1f)
+            if (gainScale < 0.999f) {
+                q = GyroTracker.slerp(IDENTITY_QUAT, q, gainScale)
+            }
             var r = GyroTracker.toMatrix3(q)
             // Re-express the device-frame rotation in the display frame.
             val psi = Math.toRadians(displayRotationDeg.toDouble()).toFloat()
@@ -1196,9 +1107,9 @@ class EisPipeline(
             fillCrop: Boolean,
             mirror: Boolean,
             presentationTimeNs: Long = -1L
-        ): Boolean {
-            if (surface == null || surface == EGL14.EGL_NO_SURFACE) return false
-            if (!EGL14.eglMakeCurrent(display, surface, surface, ctx)) return false
+        ) {
+            if (surface == null || surface == EGL14.EGL_NO_SURFACE) return
+            if (!EGL14.eglMakeCurrent(display, surface, surface, ctx)) return
             GLES20.glViewport(0, 0, width, height)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -1230,7 +1141,7 @@ class EisPipeline(
                 1f / frameSize.width.coerceAtLeast(1),
                 1f / frameSize.height.coerceAtLeast(1)
             )
-            GLES20.glUniform1f(uSharp, sharpAmount)
+            GLES20.glUniform1f(uSharp, EisTuning.UNSHARP_AMOUNT)
             val buf = quadBuffer.asFloatBuffer()
             buf.position(0)
             GLES20.glEnableVertexAttribArray(aPos)
@@ -1242,17 +1153,19 @@ class EisPipeline(
                     EGLExt.eglPresentationTimeANDROID(display, surface, presentationTimeNs)
                 } catch (e: Throwable) { /* older driver */ }
             }
-            return EGL14.eglSwapBuffers(display, surface)
-        }
-
-        if (drawTo(previewEglSurface, previewW, previewH, fillCrop = true, mirror = frontFacing)) {
-            // A frame was really presented: feed the watchdog and let the
-            // UI swap the CameraX preview out for this GL surface.
-            framesPresented.incrementAndGet()
-            if (firstFrameNotified.compareAndSet(false, true)) {
-                mainHandler.post { listener?.onFirstFrame() }
+            EGL14.eglSwapBuffers(display, surface)
+            if (surface === previewEglSurface) {
+                // Safety net (2.0.0): count frames actually presented so
+                // the caller can gate the viewfinder on real frames and
+                // the watchdog can fail a pipeline that never draws.
+                framesPresented.incrementAndGet()
+                if (firstFrameNotified.compareAndSet(false, true)) {
+                    mainHandler.post { listener?.onFirstFrame() }
+                }
             }
         }
+
+        drawTo(previewEglSurface, previewW, previewH, fillCrop = true, mirror = frontFacing)
         if (recording && videoCodec != null) {
             // Normalise the video clock: first recorded frame is t=0, like
             // the audio track (approximate sync, both start at record time).
@@ -1352,8 +1265,12 @@ class EisPipeline(
     }
 
     companion object {
-        /** Max wait for the first presented frame before teardown. */
+        /** First-frame watchdog grace (2.0.0 safety net): fail honestly
+         *  if a "started" pipeline never presents a preview frame. */
         private const val FRAME_WATCHDOG_MS = 1500L
+
+        /** Identity quaternion (w, x, y, z) — gain-scale slerp target. */
+        private val IDENTITY_QUAT = floatArrayOf(1f, 0f, 0f, 0f)
 
         private fun transpose3(m: FloatArray): FloatArray = floatArrayOf(
             m[0], m[3], m[6],

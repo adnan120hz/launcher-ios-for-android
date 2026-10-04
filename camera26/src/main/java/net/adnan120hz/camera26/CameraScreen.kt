@@ -91,6 +91,7 @@ import androidx.lifecycle.LifecycleOwner
 import java.io.File
 import kotlin.coroutines.resume
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -214,7 +215,7 @@ private fun CameraScreenContent() {
     var eisSurfaceSize by remember { mutableStateOf(0 to 0) }
     var eisFacing by remember { mutableStateOf(state.facingFront) }
     val eisWanted = state.mode == CamMode.VIDEO && state.actionOn && state.eisEnabled &&
-        state.caps.motionAvailable && !state.eisFailed
+        state.caps.gyroAvailable && !state.eisFailed
     // A shutter tap that lands while the EIS pipeline is still spinning up
     // (or whose encoder start failed) is parked here and resolved on the
     // EIS / plain path as soon as either is ready — the tap is never dropped.
@@ -284,11 +285,43 @@ private fun CameraScreenContent() {
             return
         }
         try {
+            val sloMoWanted = state.mode == CamMode.SLO_MO && state.caps.sloMoFps >= 120
             controller.startRecording(state.micGranted) { uri, ok ->
                 state.isRecording = false
                 state.quickTake = false
-                if (ok && uri != null) refreshThumb()
-                else if (!ok) state.toast = "Gagal merekam video"
+                if (ok && uri != null) {
+                    if (sloMoWanted) {
+                        // 2.0.0 item 4: real slo-mo — measure what the HAL
+                        // actually delivered, then retime to 30fps playback
+                        // when it truly is high-speed. The toast reports
+                        // the measured numbers either way (honest labels).
+                        state.sloMoProcessing = true
+                        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            val res = SloMoRetime.retime(context, uri)
+                            kotlinx.coroutines.withContext(
+                                kotlinx.coroutines.Dispatchers.Main
+                            ) {
+                                state.sloMoProcessing = false
+                                state.toast = when {
+                                    res.retimedUri != null ->
+                                        "SLO-MO jadi: ${res.measuredFps.roundToInt()} fps " +
+                                            "diputar 30 fps (${SloMoRetime.factorText(res.measuredFps)} " +
+                                            "lebih lambat, tanpa audio)"
+                                    res.measuredFps > 0f ->
+                                        "SLO-MO tidak tercapai — device merekam " +
+                                            "${res.measuredFps.roundToInt()} fps; video asli disimpan"
+                                    else ->
+                                        "SLO-MO gagal diproses — video asli disimpan"
+                                }
+                                refreshThumb()
+                            }
+                        }
+                    } else {
+                        refreshThumb()
+                    }
+                } else if (!ok) {
+                    state.toast = "Gagal merekam video"
+                }
             }
             state.isRecording = true
             state.recordSeconds = 0
@@ -364,9 +397,9 @@ private fun CameraScreenContent() {
             return
         }
         pano.discardFrames()
-        // Motion source: real gyroscope, or the fused motion sensor as a
-        // virtual gyro — only truly sensor-less devices use timed mode.
-        val gyroOk = state.caps.motionAvailable
+        // Motion source: the real gyroscope (restored 80dcd84 tracker);
+        // devices without one fall back to timed captures, same guide.
+        val gyroOk = state.caps.gyroAvailable
         pano.start(gyroOk)
         panoRt.reset(pano.yawDeg())
         state.panoSweeping = true
@@ -506,27 +539,36 @@ private fun CameraScreenContent() {
     // the eased value frame-by-frame, so pinch and dial zooms glide (and the
     // displayed ratio/label follows the same eased value).
     fun setZoomTarget(t: Float) {
+        // Buttons / pinch / programmatic zooms: EXACTLY the 80dcd84 path
+        // the user praised ("ga se smooth awal") — same clamp, and the
+        // animator below only ever uses the original spring for them.
+        // Resetting the dial flag here also means a stuck flag can never
+        // leak dial behaviour into a button tap again (2.0.0 item 7).
+        state.zoomDialDriven = false
         state.zoomTarget = if (state.facingFront) {
             t.coerceIn(state.sessionMinZoom, state.sessionMaxZoom)
         } else {
-            val lo = state.dialMin.coerceAtLeast(0.1f)
-            // Absolute ceiling across ALL bindable sessions. The old clamp
-            // used the CURRENT session's digital range only: after a
-            // mid-gesture lens rebind that range could shrink, the dial
-            // target got clamped down ("mentok") and the animator visibly
-            // pulled the zoom back toward 1x. The ceiling now also never
-            // drops below the currently displayed ratio.
-            val sessionCeil = state.sessions().maxOfOrNull { s ->
-                s.ratio * state.sessionMaxZoom
-            } ?: state.dialMax
-            val hi = maxOf(state.dialMax, sessionCeil, state.zoomRatio)
-                .coerceAtMost(40f)
-            t.coerceIn(lo, maxOf(hi, lo + 0.5f))
+            t.coerceIn(
+                state.dialMin.coerceAtLeast(0.1f),
+                state.dialMax.coerceAtMost(40f)
+            )
+        }
+    }
+
+    /** Dial zooms only: the dial ceiling is the full 40x (item 3), and
+     *  the animator chases with the dial's own tighter spring. */
+    fun setZoomTargetFromDial(t: Float) {
+        state.zoomDialDriven = true
+        state.zoomTarget = if (state.facingFront) {
+            t.coerceIn(state.sessionMinZoom, state.sessionMaxZoom)
+        } else {
+            t.coerceIn(state.dialMin.coerceAtLeast(0.1f), 40f)
         }
     }
 
     fun applyZoomAbsolute(v: Float) {
         if (state.facingFront) {
+            controller.setZoomCropOverride(null)
             controller.applyZoomRatio(
                 v.coerceIn(state.sessionMinZoom, state.sessionMaxZoom)
             )
@@ -536,13 +578,30 @@ private fun CameraScreenContent() {
         if (session.cameraId != state.desiredSessionId) {
             // Crossing into another physical lens: ask for a rebind; the bind
             // effect re-applies the current value once the new session is live.
+            // Clear any crop-zoom override so it cannot leak onto the
+            // incoming session for a frame (audit fix, 2.0.0).
+            controller.setZoomCropOverride(null)
             state.desiredSessionId = session.cameraId
             state.currentSessionRatio = session.ratio
             state.sessionBound = false
         } else if (state.sessionBound) {
-            val digital = (v / session.ratio)
-                .coerceIn(state.sessionMinZoom.coerceAtLeast(0.05f), state.sessionMaxZoom)
-            controller.applyZoomRatio(digital)
+            val digital = v / session.ratio
+            if (session.cameraId == null && digital > state.sessionMaxZoom) {
+                // 2.0.0 item 3: beyond CameraX's own zoom range, the
+                // remainder is applied as a REAL Camera2 crop-region
+                // request (centred crop of the active array, zoom-ratio
+                // key pinned to 1.0 so the HAL does not double-zoom) —
+                // preview, photo and video all read the same request.
+                controller.setZoomCropOverride(digital)
+            } else {
+                controller.setZoomCropOverride(null)
+                controller.applyZoomRatio(
+                    digital.coerceIn(
+                        state.sessionMinZoom.coerceAtLeast(0.05f),
+                        state.sessionMaxZoom
+                    )
+                )
+            }
         }
     }
 
@@ -645,6 +704,7 @@ private fun CameraScreenContent() {
             state.countdown = null
         },
         onZoomTo = { target -> setZoomTarget(target) },
+        onZoomDial = { target -> setZoomTargetFromDial(target) },
         onDialShow = { state.dialVisible = true },
         onFlash = { f ->
             state.flash = f
@@ -771,7 +831,7 @@ private fun CameraScreenContent() {
                 context.packageManager.getPackageInfo(context.packageName, 0).versionName
             } catch (e: Throwable) {
                 null
-            } ?: "1.0.0"
+            } ?: "2.0.0"
             UpdateChecker.check(context, vn)
         }
         if (found != null) {
@@ -856,7 +916,7 @@ private fun CameraScreenContent() {
             // The GL surface only replaces the CameraX preview once real
             // frames have been presented (onFirstFrame below).
             state.eisPreviewLive = false
-            val pipeline = EisPipeline(context, state.caps.perfTier)
+            val pipeline = EisPipeline(context)
             eisPipeline = pipeline
             eisFacing = state.facingFront
             pipeline.listener = object : EisPipeline.Listener {

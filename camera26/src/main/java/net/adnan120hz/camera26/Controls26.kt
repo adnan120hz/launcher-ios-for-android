@@ -17,6 +17,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -200,19 +201,27 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                             } else {
                                 Spacer(Modifier.width(1.dp))
                             }
-                            // Software EIS status: visible while the GL pipeline
-                            // is live; names the motion source honestly and
-                            // flags the 1080p cap when 4K is picked.
-                            if (state.eisActive) {
+                            // Stabilisation status pill: names the path that
+                            // is ACTUALLY stabilising (2.0.0 honest labels) —
+                            // software gyro EIS while the GL pipeline is
+                            // live; hardware stabilisation when ACTION runs
+                            // on the CameraX path (incl. the fallback after
+                            // a failed software start, the old build's
+                            // "not supported but actually working" case).
+                            val videoFamily = state.mode == CamMode.VIDEO ||
+                                state.mode == CamMode.SLO_MO
+                            val hwStabPill = videoFamily && state.actionOn && !state.eisActive &&
+                                (state.caps.videoStabilization || state.caps.oisAvailable)
+                            if (state.eisActive || hwStabPill) {
                                 Spacer(Modifier.height(6.dp))
                                 GlassPill {
                                     RunnerGlyph(IosYellow, Modifier.size(14.dp), off = false)
                                     Spacer(Modifier.width(6.dp))
                                     Text(
                                         when {
-                                            state.eisCapped -> "EIS · maks 1080p"
-                                            state.caps.gyroAvailable -> "EIS · Gyroscope"
-                                            else -> "EIS · Sensor gerak"
+                                            state.eisActive && state.eisCapped -> "EIS · maks 1080p"
+                                            state.eisActive -> "EIS · Gyroscope"
+                                            else -> "ACTION · Stabilisasi HW"
                                         },
                                         color = IosYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold
                                     )
@@ -352,7 +361,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                     contentAlignment = Alignment.Center
                 ) {
                     if (state.dialVisible) {
-                        ZoomDial(state, actions.onZoomTo, onDone = {})
+                        ZoomDial(state, actions.onZoomDial, onDone = {})
                     } else {
                         QuickZoomButtons(
                             state, actions,
@@ -460,6 +469,25 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                         .padding(horizontal = 14.dp, vertical = 5.dp)
                 ) {
                     Text(t, color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        // SLO-MO post-processing indicator (2.0.0 item 4): the recorded
+        // high-speed file is being measured and retimed off-thread.
+        if (state.sloMoProcessing) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(top = 96.dp),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                GlassPill {
+                    Text(
+                        "Memproses SLO-MO…",
+                        color = IosYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
@@ -967,6 +995,15 @@ private fun Sheet26(state: CameraState, actions: CameraActions, modifier: Modifi
                         }
                     }
                 }
+                // 2.0.0 item 5: the sheet swallows taps everywhere on its
+                // surface (gaps between tiles included) — a tap meant for a
+                // dimmed/unsupported control must never fall through the
+                // translucent card onto the shutter or carousel beneath,
+                // and no control may trap navigation gestures.
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { }
                 .padding(vertical = 14.dp)
         ) {
             // Tapping a grid item shrinks the card into its sub-panel with
@@ -1065,10 +1102,10 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
                 { actions.onToggleTorch() }) { c -> FlashGlyph(c, Modifier.size(28.dp)) }
             items += exposureItem
             // ACTION opens its own panel: master toggle + the software
-            // gyro-EIS toggle. Available when this device can stabilize for
-            // real: a gyroscope, the fused motion sensor (virtual gyro on
-            // gyro-less phones), or hardware stabilization.
-            val actionSupported = state.caps.motionAvailable ||
+            // gyro-EIS toggle. Available when this device can stabilize
+            // for real (restored 80dcd84 selection): a gyroscope for the
+            // software pipeline, or hardware stabilization behind ACTION.
+            val actionSupported = state.caps.gyroAvailable ||
                 state.caps.videoStabilization || state.caps.oisAvailable
             items += if (actionSupported) {
                 SheetItem("ACTION", state.actionOn,
@@ -1209,7 +1246,10 @@ private fun PortraitLightBar(state: CameraState) {
                             if (light.real) {
                                 state.portraitLightId = light.preset.id
                                 state.persistAll()
-                                state.showBanner(light.preset.label.uppercase())
+                                // 2.0.0 item 8: no status banner here —
+                                // the wheel's own yellow label already names
+                                // the selected light; the banner duplicated
+                                // it ("CONTOUR LIGHT" twice on screen).
                             } else {
                                 state.toast =
                                     "${light.preset.label} belum tersedia di perangkat ini"

@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -71,6 +72,8 @@ class CameraActions(
     val onShutterHoldEnd: () -> Unit,
     val onFlip: () -> Unit,
     val onZoomTo: (Float) -> Unit,
+    /** Dial-driven zooms (separate animator/clamp; defaults to [onZoomTo]). */
+    val onZoomDial: (Float) -> Unit = onZoomTo,
     val onDialShow: () -> Unit,
     val onFlash: (FlashSetting) -> Unit,
     val onToggleTorch: () -> Unit,
@@ -467,7 +470,10 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
     Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 14.dp)) {
         val title = when (kind) {
             SheetKind.FLASH -> "FLASH"
-            SheetKind.EXPOSURE -> "EXPOSURE"
+            // EXPOSURE never reaches this panel (Sheet26 routes it to the
+            // iOS tick adjust bar); the old Slider branch here was dead
+            // code with a step-snap fight pattern — removed in the 2.0.0
+            // audit so it can never be resurrected by a routing change.
             SheetKind.TIMER -> "TIMER"
             SheetKind.ASPECT -> "ASPECT"
             SheetKind.FILTER -> "FILTER"
@@ -516,36 +522,6 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                             state.showBanner("FLASH OFF")
                         }
                     }
-                }
-            }
-            SheetKind.EXPOSURE -> {
-                if (state.exposureSupported) {
-                    val valueText = String.format(
-                        Locale.US, "%+.1f", state.exposureIndex * state.exposureStep
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("−", color = Color.White, fontSize = 20.sp)
-                        Slider(
-                            value = state.exposureIndex.toFloat(),
-                            onValueChange = { actions.onExposure(it.toInt()) },
-                            valueRange = state.exposureMin.toFloat()..state.exposureMax.toFloat(),
-                            steps = (state.exposureMax - state.exposureMin - 1).coerceAtLeast(0),
-                            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
-                            colors = SliderDefaults.colors(
-                                thumbColor = IosYellow,
-                                activeTrackColor = Color.White.copy(alpha = 0.85f),
-                                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
-                            )
-                        )
-                        Text("+", color = Color.White, fontSize = 20.sp)
-                        Spacer(Modifier.width(10.dp))
-                        Text(valueText, color = IosYellow, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    }
-                } else {
-                    Text(
-                        "Exposure compensation tidak didukung kamera ini.",
-                        color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp
-                    )
                 }
             }
             SheetKind.TIMER -> {
@@ -611,13 +587,19 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                     OptionChip("Aktif", state.actionOn) { state.actionOn = true }
                 }
                 Spacer(Modifier.height(14.dp))
+                // 2.0.0: the sheet names the stabilisation path that is
+                // ACTUALLY running (the restored 80dcd84 selection logic):
+                // software gyro EIS when it is live, hardware stabilisation
+                // when that is what works behind ACTION, and an honest
+                // "none" otherwise — never a blanket "not supported".
                 Text(
-                    "EIS (SOFTWARE)", color = Color.White.copy(alpha = 0.55f),
+                    "EIS (GYRO)", color = Color.White.copy(alpha = 0.55f),
                     fontSize = 11.sp, fontWeight = FontWeight.Bold
                 )
                 Spacer(Modifier.height(8.dp))
+                val hwStab = state.caps.videoStabilization || state.caps.oisAvailable
                 when {
-                    state.caps.motionAvailable -> {
+                    state.caps.gyroAvailable -> {
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             OptionChip("Nonaktif", !state.eisEnabled) {
                                 state.eisEnabled = false
@@ -632,28 +614,30 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                         Text(
                             when {
                                 state.mode == CamMode.SLO_MO ->
-                                    "SLO-MO memakai stabilisasi hardware (API); EIS software berlaku untuk mode VIDEO."
-                                state.caps.gyroAvailable && state.eisActive ->
-                                    "EIS software sedang aktif — sumber gerak: Gyroscope."
-                                state.caps.gyroAvailable ->
-                                    "EIS software (gyro) menyala otomatis saat ACTION aktif di mode VIDEO."
+                                    "SLO-MO memakai stabilisasi hardware (API kamera) bila tersedia; EIS software berlaku untuk mode VIDEO."
                                 state.eisActive ->
-                                    "EIS software sedang aktif — sumber gerak: Sensor gerak (akselerometer + kompas), karena perangkat ini tanpa gyroscope."
+                                    "EIS software (gyro) sedang aktif."
+                                state.eisFailed && hwStab ->
+                                    "EIS software tidak berjalan di perangkat ini — ACTION memakai stabilisasi hardware (API kamera)."
+                                state.eisFailed ->
+                                    "EIS software tidak berjalan di perangkat ini — rekaman tanpa stabilisasi."
+                                state.actionOn ->
+                                    "EIS software (gyro) menyala otomatis saat ACTION aktif di mode VIDEO."
                                 else ->
-                                    "Perangkat ini tanpa gyroscope — EIS software memakai sensor gerak gabungan (akselerometer + kompas) dan menyala otomatis saat ACTION aktif di mode VIDEO."
+                                    "Aktifkan ACTION untuk menyalakan EIS software (gyro) di mode VIDEO."
                             },
                             color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
                         )
                     }
-                    state.caps.videoStabilization || state.caps.oisAvailable -> {
+                    hwStab -> {
                         Text(
-                            "Tidak ada sensor gerak yang dapat dipakai — ACTION memakai stabilisasi hardware (OIS/EIS via API kamera).",
+                            "Tidak ada gyroscope — ACTION memakai stabilisasi hardware (OIS/EIS via API kamera).",
                             color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
                         )
                     }
                     else -> {
                         Text(
-                            "Perangkat ini tidak melaporkan gyroscope, sensor gerak gabungan, maupun stabilisasi hardware.",
+                            "Perangkat ini tidak melaporkan gyroscope maupun stabilisasi hardware — ACTION merekam tanpa stabilisasi.",
                             color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
                         )
                     }
@@ -778,8 +762,9 @@ private fun ConfigPanel(state: CameraState) {
 
 /**
  * RESOLUTION + FRAME RATE card. Every option up to 4K / 60fps is always
- * visible; combinations this device does not support are dimmed and cannot
- * be tapped (the user's explicit rule), supported ones select normally.
+ * visible; combinations this device does not support are dimmed and a tap
+ * on them is consumed with an honest explanation (never passed through),
+ * supported ones select normally.
  */
 @Composable
 fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifier = Modifier) {
@@ -796,6 +781,12 @@ fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifie
             .clip(RoundedCornerShape(24.dp))
             .background(GlassPanelBrush)
             .border(1.dp, GlassRim, RoundedCornerShape(24.dp))
+            // Item 5: gaps on the card consume taps instead of leaking to
+            // the shutter beneath the translucent surface.
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { }
             .padding(horizontal = 20.dp, vertical = 14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -810,7 +801,17 @@ fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifie
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(50))
-                        .clickable(enabled = supported) { actions.onVideoRes(opt) }
+                        .clickable {
+                            // 2.0.0 item 5: unsupported options consume the
+                            // tap and explain honestly — never pass through
+                            // to the controls beneath the card.
+                            if (supported) {
+                                actions.onVideoRes(opt)
+                            } else {
+                                state.toast =
+                                    "${opt.label} tidak didukung di perangkat ini"
+                            }
+                        }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -844,7 +845,14 @@ fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifie
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(50))
-                        .clickable(enabled = supported) { actions.onFps(f) }
+                        .clickable {
+                            if (supported) {
+                                actions.onFps(f)
+                            } else {
+                                state.toast =
+                                    "$f fps tidak didukung di perangkat ini"
+                            }
+                        }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -935,17 +943,36 @@ fun TickControl(
             }
             Spacer(Modifier.height(5.dp))
         }
+        // Drag state: snapshot the value at gesture start and accumulate
+        // the drag in a local accumulator (the same pattern as ZoomDial).
+        // 2.0.0 fight-back fix: the old pointerInput(Unit) captured the
+        // FIRST composition's norm forever, so every drag event recomputed
+        // from that frozen value and the slider snapped back toward its
+        // start — dragging right felt like being pulled left. Now drag
+        // right strictly raises the value, it accumulates 1:1 with the
+        // finger, and on release nothing rewrites it: it stays exactly
+        // where the finger left it.
+        val currentNorm by androidx.compose.runtime.rememberUpdatedState(norm)
+        var gestureStartNorm by remember { mutableFloatStateOf(0f) }
+        var dragAcc by remember { mutableFloatStateOf(0f) }
         androidx.compose.foundation.Canvas(
             Modifier
                 .width(118.dp)
                 .height(24.dp)
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures(
+                        onDragStart = {
+                            gestureStartNorm = currentNorm
+                            dragAcc = 0f
+                        },
                         onDragEnd = { onDone() },
                         onDragCancel = { onDone() }
                     ) { change, drag ->
                         change.consume()
-                        onNormChange((norm + drag / 130f).coerceIn(-1f, 1f))
+                        dragAcc += drag
+                        onNormChange(
+                            (gestureStartNorm + dragAcc / 130f).coerceIn(-1f, 1f)
+                        )
                     }
                 }
         ) {

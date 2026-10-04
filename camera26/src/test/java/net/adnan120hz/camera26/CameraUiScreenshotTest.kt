@@ -352,13 +352,13 @@ class CameraUiScreenshotTest {
 
     @Test
     fun videoActionNoSensor() {
-        // Gyro-less entry device (realme C class): no gyroscope, no
-        // hardware stabilization — ACTION must still offer software EIS
-        // via the fused motion sensor ("Sensor gerak"), not grey out.
+        // Gyro-less entry device (realme C class) with no hardware
+        // stabilization either. 2.0.0 (user decision): the fused-sensor
+        // "virtual gyro" is gone — the sheet must honestly say ACTION
+        // records without stabilisation instead of promising software EIS.
         val state = baseState(paparazzi.context).apply {
             caps = caps.copy(
                 gyroAvailable = false,
-                rotationVectorAvailable = true,
                 videoStabilization = false,
                 oisAvailable = false,
                 perfTier = PerfTier.ENTRY

@@ -156,6 +156,8 @@ class CameraState(context: Context) {
     var countdown by mutableStateOf<Int?>(null)
     var isRecording by mutableStateOf(false)
     var recordSeconds by mutableStateOf(0)
+    /** SLO-MO file is being measured/retimed off the main thread. */
+    var sloMoProcessing by mutableStateOf(false)
     var quickTake by mutableStateOf(false)
 
     var thumbBitmap by mutableStateOf<Bitmap?>(null)
@@ -367,9 +369,18 @@ class CameraState(context: Context) {
             currentSessionRatio * sessionMinZoom
         ).coerceAtLeast(0.1f)
 
-    /** Absolute zoom ceiling: 40x, or the device's real maximum when lower. */
+    /** Absolute zoom ceiling. 2.0.0 (item 3): the rear dial must REACH
+     *  40x — beyond the HAL zoom range the extra reach is applied as a
+     *  Camera2 SCALER_CROP_REGION request via interop (see Controller);
+     *  the displayed ratio/MM follow the requested ratio, and the
+     *  HAL-clamp caveat is stated in the audit report. Front camera keeps
+     *  the device's real maximum. */
     val dialMax: Float
-        get() = computedMaxZoom().coerceAtLeast(dialMin + 1f)
+        get() = if (facingFront) {
+            computedMaxZoom().coerceAtLeast(dialMin + 1f)
+        } else {
+            40f.coerceAtLeast(dialMin + 1f)
+        }
 
     val currentEqMm: Int
         get() = if (caps.baseEqMm > 0f) (zoomRatio * caps.baseEqMm).roundToInt() else 0

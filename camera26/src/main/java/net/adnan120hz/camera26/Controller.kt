@@ -53,6 +53,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 suspend fun <T> ListenableFuture<T>.awaitValue(executor: Executor): T =
@@ -86,6 +87,14 @@ class CameraController(private val context: Context) {
     // Camera2 interop options applied together so neither overwrites the other.
     private var fpsWanted: Int? = null
     private var stabWanted: Boolean? = null
+
+    /**
+     * Total zoom ratio to apply as a centred SCALER_CROP_REGION when the
+     * user zooms past CameraX's own zoom range (2.0.0 item 3); null = no
+     * override, CameraX zoom rules. Updated per animation frame but only
+     * re-applied when it moved meaningfully.
+     */
+    @Volatile private var zoomCropRatio: Float? = null
 
     val recordingActive: Boolean get() = recording != null
     val videoReady: Boolean get() = videoCapture != null
@@ -303,6 +312,30 @@ class CameraController(private val context: Context) {
         } catch (e: Throwable) { /* unsupported */ }
     }
 
+    /**
+     * Zoom past CameraX's advertised maximum (2.0.0 item 3): a total ratio
+     * above the range is applied as a centred crop of the sensor's active
+     * array via SCALER_CROP_REGION, with CONTROL_ZOOM_RATIO pinned to 1.0
+     * so the HAL never double-zooms. Every stream (preview, photo, video)
+     * reads the same capture request, so what the finder shows is what
+     * gets captured. null clears the override. HALs may clamp the crop to
+     * their own minimum crop size — that is a device-truth caveat recorded
+     * in the audit report, not something the app can read back (CameraX
+     * 1.4.2 interop exposes no capture-result listener).
+     */
+    fun setZoomCropOverride(totalRatio: Float?) {
+        val v = totalRatio?.takeIf { it > 1f }
+        val prev = zoomCropRatio
+        if (v == null && prev == null) return
+        if (v != null && prev != null &&
+            kotlin.math.abs(v - prev) / prev < 0.004f
+        ) {
+            return // ignore sub-half-percent churn from the animator
+        }
+        zoomCropRatio = v
+        applyCamera2Options()
+    }
+
     fun setTargetFps(fps: Int) {
         fpsWanted = fps
         applyCamera2Options()
@@ -330,6 +363,30 @@ class CameraController(private val context: Context) {
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                     if (on) 1 else 0 // 1 = CONTROL_VIDEO_STABILIZATION_MODE_ON
                 )
+            }
+            zoomCropRatio?.let { zr ->
+                val aa = try {
+                    Camera2CameraInfo.from(cam.cameraInfo)
+                        .getCameraCharacteristic(
+                            android.hardware.camera2.CameraCharacteristics
+                                .SENSOR_INFO_ACTIVE_ARRAY_SIZE
+                        )
+                } catch (e: Throwable) {
+                    null
+                }
+                if (aa != null && aa.width() > 0 && aa.height() > 0) {
+                    val cw = (aa.width() / zr).roundToInt().coerceAtLeast(1)
+                    val ch = (aa.height() / zr).roundToInt().coerceAtLeast(1)
+                    val left = aa.left + (aa.width() - cw) / 2
+                    val top = aa.top + (aa.height() - ch) / 2
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.SCALER_CROP_REGION,
+                        android.graphics.Rect(left, top, left + cw, top + ch)
+                    )
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_ZOOM_RATIO, 1.0f
+                    )
+                }
             }
             control.setCaptureRequestOptions(builder.build())
         } catch (e: Throwable) { /* device clamps silently */ }
