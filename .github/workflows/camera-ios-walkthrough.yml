@@ -38,15 +38,39 @@ jobs:
 
       - name: Pick and boot an iPhone simulator
         run: |
-          UDID=$(xcrun simctl list devices available --json | jq -r '
-            [.devices | to_entries[] | .key as $rt | .value[]
-             | select(.isAvailable and (.name | startswith("iPhone")))
-             | {rt: $rt, udid: .udid}]
-            | sort_by(.rt) | last.udid // empty')
+          xcrun simctl list runtimes | grep -i ios || true
+          # The iOS 26.5 simulator on this image exposes only a null
+          # placeholder capture device (AVFoundationErrorDomain -11800 /
+          # FigCapture -12782 at startRunning — no real virtual camera
+          # behind it). Prefer the newest pre-26 iOS runtime, whose
+          # simulator still carries a self-contained simulated camera;
+          # fall back to the newest iOS runtime overall.
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json, re, sys
+          data = json.load(sys.stdin)
+          cands = []
+          for rt, devs in data["devices"].items():
+              m = re.search(r"iOS-(\d+)-(\d+)", rt)
+              ver = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+              for d in devs:
+                  if d.get("isAvailable") and d["name"].startswith("iPhone"):
+                      cands.append((ver, d["udid"], d["name"]))
+          pre26 = [c for c in cands if c[0] < (26, 0)]
+          pool = pre26 if pre26 else cands
+          pool.sort()
+          if pool:
+              print(pool[-1][1])
+              sys.stderr.write(f"chosen simulator: {pool[-1][2]} runtime {pool[-1][0]}\n")
+          ')
           if [ -z "$UDID" ]; then
             RT=$(xcrun simctl list runtimes --json | jq -r '
-              [.runtimes[] | select(.isAvailable and (.name | startswith("iOS")))]
+              [.runtimes[] | select(.isAvailable and (.name | startswith("iOS")) and (.version | startswith("26") | not))]
               | sort_by(.version) | last.identifier // empty')
+            if [ -z "$RT" ]; then
+              RT=$(xcrun simctl list runtimes --json | jq -r '
+                [.runtimes[] | select(.isAvailable and (.name | startswith("iOS")))]
+                | sort_by(.version) | last.identifier // empty')
+            fi
             DT=$(xcrun simctl list devicetypes --json | jq -r '
               [.devicetypes[] | select(.name | startswith("iPhone"))]
               | last.identifier // empty')
