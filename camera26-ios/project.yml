@@ -4,6 +4,10 @@ options:
   createIntermediateGroups: true
 deploymentTarget:
   iOS: "18.0"
+settings:
+  base:
+    MARKETING_VERSION: "2.0.0"
+    CURRENT_PROJECT_VERSION: "7"
 targets:
   KameraIOS:
     type: application
