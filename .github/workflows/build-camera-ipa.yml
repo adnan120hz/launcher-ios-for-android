@@ -1,0 +1,65 @@
+name: Build Kamera iOS (IPA)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'camera26-ios/**'
+      - '.github/workflows/build-camera-ipa.yml'
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    # Needs an Xcode 26 SDK for the real iOS 26 Liquid Glass APIs
+    # (glassEffect). The macos-26 image ships Xcode 26.
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode (26.x)
+        run: |
+          ls /Applications | grep -i Xcode || true
+          NEWEST=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$NEWEST" ]; then sudo xcode-select -s "$NEWEST"; fi
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: camera26-ios
+        run: xcodegen generate
+
+      - name: Build unsigned app (iphoneos)
+        working-directory: camera26-ios
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project KameraIOS.xcodeproj \
+            -scheme KameraIOS \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned IPA
+        working-directory: camera26-ios
+        run: |
+          APP=$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          echo "Packaging: $APP"
+          test -n "$APP"
+          rm -rf Payload Kamera-iOS.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Kamera-iOS.ipa Payload
+          ls -la Kamera-iOS.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kamera-iOS-IPA
+          path: camera26-ios/Kamera-iOS.ipa
