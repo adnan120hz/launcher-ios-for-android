@@ -19,6 +19,19 @@ targets:
           - "Info.plist"
     info:
       path: KameraIOS/Info.plist
+      properties:
+        CFBundleDisplayName: "Kamera iOS"
+        CFBundleShortVersionString: "2.0.0"
+        CFBundleVersion: "7"
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        NSCameraUsageDescription: "Kamera iOS memerlukan akses kamera agar Anda dapat mengambil foto dan merekam video secara langsung dari aplikasi."
+        NSMicrophoneUsageDescription: "Kamera iOS memerlukan akses mikrofon agar suara dapat ikut terekam saat Anda merekam video."
+        NSPhotoLibraryAddUsageDescription: "Kamera iOS memerlukan izin untuk menyimpan hasil foto dan video ke galeri Foto Anda."
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
     settings:
       base:
         PRODUCT_NAME: KameraIOS
