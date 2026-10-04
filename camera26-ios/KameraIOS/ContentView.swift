@@ -231,6 +231,7 @@ struct ContentView: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("shutterButton")
         .frame(height: 84)
     }
 

@@ -61,7 +61,7 @@ struct TopPills: View {
                 pillIcon("square.grid.2x2", active: vm.styleId != nil || vm.filterId != nil) {
                     vm.sheet = .styles
                 }
-                pillIcon("grid", active: vm.sheet == .grid) {
+                pillIcon("grid", active: vm.sheet == .grid, identifier: "pill_grid") {
                     vm.sheet = vm.sheet == .grid ? .none : .grid
                 }
             }
@@ -72,7 +72,7 @@ struct TopPills: View {
         .padding(.horizontal, 14)
     }
 
-    private func pillIcon(_ symbol: String, active: Bool, action: @escaping () -> Void) -> some View {
+    private func pillIcon(_ symbol: String, active: Bool, identifier: String? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .medium))
@@ -81,6 +81,7 @@ struct TopPills: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier ?? "pill_\(symbol)")
     }
 }
 

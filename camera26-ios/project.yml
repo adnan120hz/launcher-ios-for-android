@@ -43,3 +43,27 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_PREVIEWS: YES
+  KameraIOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: KameraIOSUITests
+    dependencies:
+      - target: KameraIOS
+    settings:
+      base:
+        PRODUCT_NAME: KameraIOSUITests
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  KameraIOS:
+    build:
+      targets:
+        KameraIOS: all
+        KameraIOSUITests: [test]
+    test:
+      targets:
+        - KameraIOSUITests

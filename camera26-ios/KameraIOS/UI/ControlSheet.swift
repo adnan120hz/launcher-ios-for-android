@@ -198,6 +198,7 @@ struct ControlSheet: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("tile_\(tile.id)")
                 .opacity(tile.enabled ? 1 : 0.75)
             }
         }

@@ -24,6 +24,7 @@ struct ZoomControls: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("zoomStopButton")
                 .simultaneousGesture(
                     LongPressGesture(minimumDuration: 0.35).onEnded { _ in
                         vm.dialVisible = true
