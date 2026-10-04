@@ -1,7 +1,6 @@
 package net.adnan120hz.camera26
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -105,63 +104,6 @@ fun ArcDial(state: CameraState, modifier: Modifier = Modifier) {
             fontSize = 17.sp,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 30.dp)
-        )
-    }
-}
-
-/** iOS 18 horizontal zoom strip: ticks slide under a fixed center needle. */
-@Composable
-fun StripDial(state: CameraState, modifier: Modifier = Modifier) {
-    val min = state.dialMin
-    val max = state.dialMax
-    val tNow = tOf(state.zoomRatio, min, max)
-    BoxWithConstraints(
-        modifier
-            .fillMaxWidth()
-            .height(58.dp)
-            .background(Color.Black.copy(alpha = 0.35f))
-    ) {
-        val w = maxWidth
-        Canvas(Modifier.fillMaxSize()) {
-            val cx = size.width / 2f
-            for (i in 0..72) {
-                val tt = i / 72f
-                val x = cx + (tt - tNow) * size.width * 1.5f
-                if (x < 0f || x > size.width) continue
-                val major = i % 6 == 0
-                drawLine(
-                    Color.White.copy(alpha = if (major) 0.9f else 0.45f),
-                    Offset(x, size.height * 0.52f),
-                    Offset(x, size.height * (if (major) 0.86f else 0.72f)),
-                    strokeWidth = if (major) 2.4f else 1.3f
-                )
-            }
-            val tri = Path().apply {
-                moveTo(cx, 12f)
-                lineTo(cx - 7f, 0f)
-                lineTo(cx + 7f, 0f)
-                close()
-            }
-            drawPath(tri, IosYellow)
-        }
-        state.quickStops().forEach { stop ->
-            val tt = tOf(stop, min, max)
-            val x = w / 2 + w * ((tt - tNow) * 1.5f)
-            if (x > 8.dp && x < w - 24.dp) {
-                Text(
-                    formatRatioLabel(stop),
-                    color = Color.White.copy(alpha = 0.75f),
-                    fontSize = 10.sp,
-                    modifier = Modifier.offset(x - 8.dp, 2.dp)
-                )
-            }
-        }
-        Text(
-            formatZoomValue(state.zoomRatio),
-            color = IosYellow,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.align(Alignment.TopCenter)
         )
     }
 }

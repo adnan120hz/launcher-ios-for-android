@@ -1,6 +1,7 @@
 package net.adnan120hz.camera26
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.camera.extensions.ExtensionMode
@@ -10,8 +11,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import kotlin.math.roundToInt
-
-enum class UiStyle { IOS26, IOS18 }
 
 enum class CamMode(val label: String) {
     TIME_LAPSE("TIME-LAPSE"),
@@ -27,21 +26,25 @@ enum class FlashSetting { OFF, AUTO, ON }
 
 enum class PhotoAspect { RATIO_4_3, RATIO_16_9, SQUARE }
 
-enum class SheetKind { NONE, GRID, FLASH, EXPOSURE, TIMER, ASPECT, RESOLUTION, FILTER, STYLES, APERTURE }
+enum class SheetKind { NONE, GRID, FLASH, EXPOSURE, TIMER, ASPECT, RESOLUTION, FILTER, STYLES, APERTURE, ACTION }
 
 data class VideoResOption(val label: String, val qualityName: String)
 
 class CameraState(context: Context) {
-    private val prefs = context.getSharedPreferences("camera26_prefs", Context.MODE_PRIVATE)
+    // Nullable so screenshot tests (layoutlib contexts) can construct the
+    // state even where SharedPreferences is unavailable; real devices always
+    // get the real preferences store.
+    private val prefs: SharedPreferences? = try {
+        context.getSharedPreferences("camera26_prefs", Context.MODE_PRIVATE)
+    } catch (e: Throwable) {
+        null
+    }
 
-    var uiStyle by mutableStateOf(
-        if (prefs.getString("ui_style", "ios26") == "ios18") UiStyle.IOS18 else UiStyle.IOS26
-    )
     var mode by mutableStateOf(CamMode.PHOTO)
     var facingFront by mutableStateOf(false)
 
     var flash by mutableStateOf(
-        when (prefs.getString("flash", "AUTO")) {
+        when (prefs?.getString("flash", "AUTO")) {
             "OFF" -> FlashSetting.OFF
             "ON" -> FlashSetting.ON
             else -> FlashSetting.AUTO
@@ -50,13 +53,13 @@ class CameraState(context: Context) {
     var videoTorch by mutableStateOf(false)
     var timerSec by mutableStateOf(0)
     var aspect by mutableStateOf(
-        when (prefs.getString("aspect", "4_3")) {
+        when (prefs?.getString("aspect", "4_3")) {
             "16_9" -> PhotoAspect.RATIO_16_9
             "1_1" -> PhotoAspect.SQUARE
             else -> PhotoAspect.RATIO_4_3
         }
     )
-    var gridOn by mutableStateOf(prefs.getBoolean("grid", false))
+    var gridOn by mutableStateOf(prefs?.getBoolean("grid", false) ?: false)
 
     // Exposure compensation (index into the device range).
     var exposureIndex by mutableStateOf(0)
@@ -77,9 +80,21 @@ class CameraState(context: Context) {
     var sessionMaxZoom by mutableStateOf(10f)
 
     var sheet by mutableStateOf(SheetKind.NONE)
-    var trayOpen by mutableStateOf(false)       // iOS 18 chevron tray
-    var modeStripVisible by mutableStateOf(false) // iOS 26 transient mode labels
     var dialVisible by mutableStateOf(false)
+
+    // Mode carousel pill (below the shutter): horizontal drag offset in px,
+    // written by the pill's gesture handler and settled back to 0 on release.
+    var carouselDragPx by mutableFloatStateOf(0f)
+
+    // True while a finger presses/drag the carousel pill: drives the iOS 26
+    // Liquid Glass jelly-bubble on the selected capsule (idle = plain capsule).
+    var carouselPressed by mutableStateOf(false)
+
+    // When a small capture aspect (4:3 / 1:1) letterboxes the preview, the
+    // expand (⤢) button flips the preview to full-bleed; capture is unaffected.
+    var previewFilled by mutableStateOf(false)
+
+    var settingsOpen by mutableStateOf(false)
 
     var focusPoint by mutableStateOf<Offset?>(null)
     var focusLocked by mutableStateOf(false)
@@ -95,8 +110,8 @@ class CameraState(context: Context) {
 
     var videoResOptions by mutableStateOf<List<VideoResOption>>(emptyList())
     var videoRes by mutableStateOf<VideoResOption?>(null)
-    var fps by mutableStateOf(prefs.getInt("fps", 30))
-    var savedQualityName: String? = prefs.getString("video_quality", null)
+    var fps by mutableStateOf(prefs?.getInt("fps", 30) ?: 30)
+    var savedQualityName: String? = prefs?.getString("video_quality", null)
 
     var caps by mutableStateOf(DeviceCaps())
     var capsReady by mutableStateOf(false)
@@ -105,6 +120,21 @@ class CameraState(context: Context) {
     var nightOn by mutableStateOf(false)
 
     var toast by mutableStateOf<String?>(null)
+
+    // iOS-style transient status banner ("FLASH ON", "NIGHT MODE OFF", …)
+    // shown at the top centre whenever a toggle changes. The nonce restarts
+    // the auto-dismiss timer on every change.
+    var bannerText by mutableStateOf<String?>(null)
+    var bannerNonce by mutableStateOf(0)
+    fun showBanner(text: String) {
+        bannerText = text
+        bannerNonce += 1
+    }
+
+    /** Portrait lighting effect id (see PortraitLights in Grade.kt). */
+    var portraitLightId by mutableStateOf(
+        prefs?.getString("portrait_light", "natural") ?: "natural"
+    )
     var micGranted by mutableStateOf(false)
     var micAsked by mutableStateOf(false)
     var bindError by mutableStateOf<String?>(null)
@@ -113,27 +143,75 @@ class CameraState(context: Context) {
     // FILTER / STYLES are real colour grades applied at capture; APERTURE
     // drives the portrait background-blur strength; ACTION is video
     // stabilization; TIME-LAPSE runs an interval-capture encoder.
-    var filterId by mutableStateOf<String?>(prefs.getString("filter_id", null))
-    var styleId by mutableStateOf<String?>(prefs.getString("style_id", null))
-    var apertureF by mutableStateOf(prefs.getFloat("aperture_f", 2.8f))
+    var filterId by mutableStateOf<String?>(prefs?.getString("filter_id", null))
+    var styleId by mutableStateOf<String?>(prefs?.getString("style_id", null))
+    var apertureF by mutableStateOf(prefs?.getFloat("aperture_f", 2.8f) ?: 2.8f)
     var actionOn by mutableStateOf(false)
+
+    // Software gyro EIS (ACTION mode): the GL gyro pipeline takes over the
+    // VIDEO preview + recording when ACTION is on and the user toggle allows.
+    var eisEnabled by mutableStateOf(prefs?.getBoolean("eis_enabled", true) ?: true)
+    /** Runtime: the EIS GL pipeline currently owns the camera/preview. */
+    var eisActive by mutableStateOf(false)
+    /** Runtime latch: the pipeline failed on this device -> hw/plain fallback. */
+    var eisFailed by mutableStateOf(false)
+
+    /** True while ACTION-EIS records a >1080p selection at its 1080p cap. */
+    val eisCapped: Boolean
+        get() = eisActive && videoRes?.qualityName == "UHD"
     var timelapseRunning by mutableStateOf(false)
     var timelapseFrames by mutableStateOf(0)
     val timelapseIntervalMs: Long = 1000L
 
-    /** The active colour grade: a chosen filter wins over a style, like iOS. */
+    // Panorama (real sweep-and-stitch, see Pano.kt): shutter starts a guided
+    // sweep; the gyroscope (or a timed fallback) triggers frame captures at
+    // even yaw steps and the frames are cylindrically stitched into one JPEG.
+    var panoSweeping by mutableStateOf(false)
+    var panoStitching by mutableStateOf(false)
+    var panoProgress by mutableFloatStateOf(0f)
+    var panoFrameCount by mutableStateOf(0)
+    var panoTooFast by mutableStateOf(false)
+    var panoDirRight by mutableStateOf(true)
+
+    // Grade adjustment (Styles/Filters): overall intensity + warmth shift,
+    // applied for real on top of the selected preset's matrix.
+    var gradeIntensity by mutableFloatStateOf(prefs?.getFloat("grade_intensity", 1f) ?: 1f)
+    var gradeWarmth by mutableFloatStateOf(prefs?.getFloat("grade_warmth", 0f) ?: 0f)
+
+    /** The active colour grade preset: a chosen filter wins over a style, like iOS. */
     fun activeGrade(): GradePreset? =
         filterId?.let { id -> FilterPresets.firstOrNull { it.id == id } }
             ?: styleId?.let { id -> StylePresets.firstOrNull { it.id == id } }
+            ?: if (mode == CamMode.PORTRAIT) {
+                // Portrait lighting rides the same real grade pipeline:
+                // a chosen lighting look grades the captured portrait.
+                PortraitLights.firstOrNull { it.preset.id == portraitLightId }
+                    ?.takeIf { it.real && it.preset.id != "natural" }?.preset
+            } else null
+
+    /** The active grade as a colour matrix, including intensity/warmth adjustments. */
+    fun activeGradeMatrix(): FloatArray? =
+        activeGrade()?.matrix(gradeIntensity, gradeWarmth)
 
     /** Portrait blur strength 0..1 derived from the ƒ slider (wide ƒ = strong blur). */
     val apertureStrength: Float
         get() = ((16f - apertureF) / (16f - 1.4f)).coerceIn(0.05f, 1f)
 
     /**
-     * Capability-based mode list: every mode that appears in the carousel is
-     * genuinely functional on THIS device. Modes with no reliable public-API
-     * path (Cinematic, Pano) never appear at all.
+     * Whether the hardware exposes a wider-than-1x view: the logical camera's
+     * zoom-ratio range dips below 1 (fused ultra-wide) or a physical
+     * ultra-wide lens session exists. Only then does the 0.5 stop appear.
+     */
+    val hasUltraWide: Boolean
+        get() = caps.logicalMinZoomRatio < 0.99f || caps.backSessions.any { it.ratio < 0.95f }
+
+    /**
+     * Capability-based mode availability: CINEMATIC has no reliable
+     * public-API path on this platform, so it stays visible in the carousel
+     * but dimmed and unselectable; SLO-MO needs real >=120fps support.
+     * PANO is real (gyro-guided sweep + cylindrical stitch, Pano.kt) and
+     * always available — without a gyroscope it falls back to timed
+     * captures with the same guide.
      */
     fun modeAvailable(m: CamMode): Boolean = when (m) {
         CamMode.PHOTO, CamMode.VIDEO -> true
@@ -142,7 +220,8 @@ class CameraState(context: Context) {
         CamMode.PORTRAIT -> bokehExtAvailable || PortraitFallback.available
         CamMode.TIME_LAPSE -> caps.timelapseAvailable
         CamMode.SLO_MO -> caps.sloMoFps >= 120
-        CamMode.CINEMATIC, CamMode.PANO -> false
+        CamMode.PANO -> true
+        CamMode.CINEMATIC -> false
     }
 
     /** ExtensionMode to bind with, or NONE. Portrait=Bokeh, Night=Night extension. */
@@ -176,15 +255,52 @@ class CameraState(context: Context) {
         return chosen
     }
 
-    /** Quick-pick zoom stops (absolute ratios) shown as small buttons. */
+    /** Raw zoom ceiling before the dial-minimum clamp (no quickStops dependency). */
+    private fun computedMaxZoom(): Float {
+        var m = currentSessionRatio * sessionMaxZoom
+        if (caps.backSessions.any { it.ratio > 1.3f }) m = maxOf(m, 40f)
+        return minOf(40f, m)
+    }
+
+    /**
+     * Absolute ratio of the ultra-wide stop: the physical ultra-wide
+     * session's real ratio when one is bindable, else 0.5 (logical camera
+     * fusing the ultra-wide below 1x). Only meaningful when [hasUltraWide].
+     */
+    private fun uwStopRatio(): Float =
+        caps.backSessions.firstOrNull { it.ratio < 0.95f }?.ratio ?: 0.5f
+
+    /**
+     * Quick-pick zoom stops (absolute ratios) shown as small buttons.
+     * The user's exact rule (iPhone 17 Pro pattern, nothing else):
+     * 0.5 · 1x · 2x · 8x — never a row of integer steps and never a
+     * per-lens telephoto button (a 4x lens does NOT add a 4x button).
+     *
+     *  - 0.5 only when an ultra-wide is hardware-detected (the logical
+     *    camera fuses below 1x, or a physical ultra-wide lens exists);
+     *    the value is the real ultra-wide ratio.
+     *  - 1x (main lens) and 2x are always shown.
+     *  - 8x only when this device's zoom range reaches it. Below that,
+     *    the device's real maximum takes its place (real number label);
+     *    when the maximum is 2x or less, no top stop is shown at all.
+     *
+     * Physical telephoto lenses are still picked up by the zoom engine
+     * itself ([sessionFor]) as the ratio sweeps past them. Continuous
+     * zoom (arc dial via long-press on any stop, pinch, spring) still
+     * runs smoothly to min(40x, device max); these are only the buttons.
+     */
     fun quickStops(): List<Float> {
         if (facingFront) return listOf(1f)
-        val stops = sortedSetOf<Float>()
-        sessions().forEach { stops += it.ratio }
-        if (caps.logicalMinZoomRatio < 1f) stops += 0.5f
+        val maxZ = computedMaxZoom()
+        val stops = mutableListOf<Float>()
+        if (hasUltraWide) stops += uwStopRatio()
         stops += 1f
-        val maxApprox = minOf(100f, currentSessionRatio * sessionMaxZoom)
-        return stops.filter { it <= maxApprox + 0.01f }.sorted()
+        if (maxZ >= 2f) stops += 2f
+        when {
+            maxZ >= 8f -> stops += 8f
+            maxZ > 2f -> stops += maxZ
+        }
+        return stops.filter { it <= maxZ + 0.01f }.distinct().sorted()
     }
 
     val dialMin: Float
@@ -193,19 +309,16 @@ class CameraState(context: Context) {
             currentSessionRatio * sessionMinZoom
         ).coerceAtLeast(0.1f)
 
+    /** Absolute zoom ceiling: 40x, or the device's real maximum when lower. */
     val dialMax: Float
-        get() {
-            var m = currentSessionRatio * sessionMaxZoom
-            if (caps.backSessions.any { it.ratio > 1.3f }) m = maxOf(m, 100f)
-            return minOf(100f, m).coerceAtLeast(dialMin + 1f)
-        }
+        get() = computedMaxZoom().coerceAtLeast(dialMin + 1f)
 
     val currentEqMm: Int
         get() = if (caps.baseEqMm > 0f) (zoomRatio * caps.baseEqMm).roundToInt() else 0
 
     fun persistAll() {
-        prefs.edit()
-            .putString("ui_style", if (uiStyle == UiStyle.IOS18) "ios18" else "ios26")
+        val p = prefs ?: return
+        p.edit()
             .putString("flash", flash.name)
             .putString(
                 "aspect", when (aspect) {
@@ -219,7 +332,11 @@ class CameraState(context: Context) {
             .putString("video_quality", videoRes?.qualityName)
             .putString("filter_id", filterId)
             .putString("style_id", styleId)
+            .putString("portrait_light", portraitLightId)
             .putFloat("aperture_f", apertureF)
+            .putBoolean("eis_enabled", eisEnabled)
+            .putFloat("grade_intensity", gradeIntensity)
+            .putFloat("grade_warmth", gradeWarmth)
             .apply()
     }
 }

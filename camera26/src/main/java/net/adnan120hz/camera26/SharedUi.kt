@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -50,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -77,22 +80,23 @@ class CameraActions(
     val onVideoRes: (VideoResOption) -> Unit,
     val onFps: (Int) -> Unit,
     val onToggleGrid: () -> Unit,
-    val onUiStyle: (UiStyle) -> Unit,
     val onToggleNight: () -> Unit,
     val onThumbnailTap: () -> Unit,
-    val onToggleTray: () -> Unit
+    /** Cancel an in-progress panorama sweep (guide ✕). Default: no-op. */
+    val onPanoCancel: () -> Unit = {}
 )
 
 @Composable
 fun ShutterButton(
     state: CameraState,
     actions: CameraActions,
-    glassRing: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** TIME-LAPSE idle look: a dotted ring around the shutter, like iOS. */
+    dottedRing: Boolean = false
 ) {
     val pressScale = remember { Animatable(1f) }
     val scope = rememberCoroutineScope()
-    val recording = state.isRecording || state.timelapseRunning
+    val recording = state.isRecording || state.timelapseRunning || state.panoSweeping
     val innerSize by animateDpAsState(
         targetValue = if (recording) 32.dp else 62.dp,
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
@@ -108,7 +112,7 @@ fun ShutterButton(
                         awaitFirstDown(requireUnconsumed = false)
                         scope.launch {
                             pressScale.animateTo(
-                                0.9f,
+                                0.92f,
                                 spring(dampingRatio = Spring.DampingRatioMediumBouncy)
                             )
                         }
@@ -131,15 +135,26 @@ fun ShutterButton(
             },
         contentAlignment = Alignment.Center
     ) {
-        Box(
-            Modifier
-                .size(78.dp)
-                .border(
-                    if (glassRing) 3.dp else 5.dp,
-                    Color.White.copy(alpha = if (glassRing) 0.75f else 1f),
-                    CircleShape
+        if (dottedRing) {
+            androidx.compose.foundation.Canvas(Modifier.size(86.dp)) {
+                drawCircle(
+                    Color.White.copy(alpha = 0.85f),
+                    radius = size.minDimension / 2f - 2.dp.toPx(),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = 2.4.dp.toPx(),
+                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                            floatArrayOf(3.dp.toPx(), 5.dp.toPx())
+                        )
+                    )
                 )
-        )
+            }
+        } else {
+            Box(
+                Modifier
+                    .size(78.dp)
+                    .border(3.dp, Color.White.copy(alpha = 0.75f), CircleShape)
+            )
+        }
         val innerColor =
             if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO ||
                 state.mode == CamMode.TIME_LAPSE || recording
@@ -157,29 +172,29 @@ fun ShutterButton(
 fun ThumbnailButton(
     state: CameraState,
     actions: CameraActions,
-    round: Boolean,
     modifier: Modifier = Modifier
 ) {
     val bmp = state.thumbBitmap
+    if (bmp == null) {
+        // iOS shows nothing here until a photo exists — no placeholder glyph.
+        Spacer(modifier.size(46.dp))
+        return
+    }
     Box(
         modifier
             .size(46.dp)
-            .clip(if (round) CircleShape else RoundedCornerShape(9.dp))
+            .clip(CircleShape)
             .background(Color(0xFF2C2C2E))
-            .border(1.dp, Color.White.copy(alpha = 0.25f), if (round) CircleShape else RoundedCornerShape(9.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape)
             .clickable { actions.onThumbnailTap() },
         contentAlignment = Alignment.Center
     ) {
-        if (bmp != null) {
-            androidx.compose.foundation.Image(
-                bitmap = bmp.asImageBitmap(),
-                contentDescription = null,
-                modifier = Modifier.size(46.dp),
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop
-            )
-        } else {
-            CameraBodyGlyph(Color.White.copy(alpha = 0.5f), Modifier.size(24.dp))
-        }
+        androidx.compose.foundation.Image(
+            bitmap = bmp.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier.size(46.dp),
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+        )
     }
 }
 
@@ -205,21 +220,16 @@ fun QuickZoomButtons(
     modifier: Modifier = Modifier
 ) {
     val stops = state.quickStops()
-    val glass = state.uiStyle == UiStyle.IOS26
+    // At most four stops (0.5 / 1x / 2x / 8x) — always the full-size row.
     Row(modifier, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         stops.forEach { stop ->
             val active = abs(state.zoomRatio - stop) < 0.07f
-            val base = Modifier
-                .size(36.dp)
-                .clip(CircleShape)
-            val styled = if (glass) {
-                base.background(GlassPillBrush)
-                    .border(1.dp, if (active) IosYellow.copy(alpha = 0.55f) else GlassRim, CircleShape)
-            } else {
-                base.background(Color.Black.copy(alpha = if (active) 0.62f else 0.42f))
-            }
             Box(
-                styled
+                Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(GlassPillBrush)
+                    .border(1.dp, if (active) IosYellow.copy(alpha = 0.55f) else GlassRim, CircleShape)
                     .combinedClickable(
                         onClick = { actions.onZoomTo(stop) },
                         onLongClick = { actions.onDialShow(); actions.onZoomTo(stop) }
@@ -237,13 +247,16 @@ fun QuickZoomButtons(
     }
 }
 
-/** Circular control inside the sheets. Every control shown is functional. */
+/** Circular control inside the sheets. Functional controls only light up;
+ *  [enabled] = false renders it dimmed (its onClick still fires, so the UI
+ *  can explain honestly why it is unavailable). */
 @Composable
 fun ControlButton(
     label: String,
     active: Boolean,
     onClick: () -> Unit,
-    glyph: @Composable (Color) -> Unit
+    glyph: @Composable (Color) -> Unit,
+    enabled: Boolean = true
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -256,13 +269,24 @@ fun ControlButton(
             Modifier
                 .size(62.dp)
                 .clip(CircleShape)
-                .background(GlassButton),
+                .background(if (enabled) GlassButton else GlassButton.copy(alpha = 0.55f)),
             contentAlignment = Alignment.Center
         ) {
-            glyph(if (active) IosYellow else Color.White)
+            glyph(
+                when {
+                    !enabled -> Color.White.copy(alpha = 0.32f)
+                    active -> IosYellow
+                    else -> Color.White
+                }
+            )
         }
         Spacer(Modifier.height(6.dp))
-        Text(label, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+        Text(
+            label,
+            color = if (enabled) Color.White else Color.White.copy(alpha = 0.35f),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium
+        )
     }
 }
 
@@ -290,26 +314,149 @@ fun OptionChip(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** Horizontally scrolling preset chips for FILTER / STYLES (real colour grades). */
+/** One square swatch in the FILTER / STYLES picker, rendered from the real grade matrix. */
 @Composable
-private fun GradeChips(
+private fun GradeSwatch(
+    topColor: Color,
+    bottomColor: Color,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable { onClick() }
+    ) {
+        Box(
+            Modifier
+                .size(54.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        listOf(topColor, bottomColor)
+                    )
+                )
+                .border(
+                    if (selected) 2.5.dp else 1.dp,
+                    if (selected) IosYellow else Color.White.copy(alpha = 0.25f),
+                    RoundedCornerShape(10.dp)
+                )
+        )
+        Spacer(Modifier.height(5.dp))
+        Text(
+            label,
+            color = if (selected) IosYellow else Color.White.copy(alpha = 0.85f),
+            fontSize = 9.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 2,
+            modifier = Modifier.width(60.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+    }
+}
+
+/** Square-swatch picker for FILTER / STYLES (real colour grades) + adjustment sliders. */
+@Composable
+private fun GradeSwatches(
     presets: List<GradePreset>,
     selectedId: String?,
+    intensity: Float,
     onSelect: (String?) -> Unit
 ) {
     Row(
         Modifier.horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        OptionChip("Tidak ada", selectedId == null) { onSelect(null) }
+        // "No grade" swatch: an ungraded neutral gradient.
+        GradeSwatch(
+            Color(0xFF8A8F98), Color(0xFF4A4F57),
+            "Tidak ada", selectedId == null
+        ) { onSelect(null) }
         presets.forEach { preset ->
-            OptionChip(preset.label, selectedId == preset.id) { onSelect(preset.id) }
+            val (top, bottom) = gradeSwatchColors(preset, intensity)
+            GradeSwatch(top, bottom, preset.label, selectedId == preset.id) {
+                onSelect(preset.id)
+            }
         }
     }
-    Spacer(Modifier.height(6.dp))
+}
+
+/** Intensity + warmth sliders: real adjustments layered onto the active grade. */
+@Composable
+private fun GradeAdjustSliders(state: CameraState) {
+    if (state.activeGrade() == null) return
+    Spacer(Modifier.height(14.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Intensitas", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, modifier = Modifier.width(76.dp))
+        Slider(
+            value = state.gradeIntensity,
+            onValueChange = { state.gradeIntensity = it },
+            onValueChangeFinished = { state.persistAll() },
+            valueRange = 0f..1f,
+            modifier = Modifier.weight(1f),
+            colors = SliderDefaults.colors(
+                thumbColor = IosYellow,
+                activeTrackColor = Color.White.copy(alpha = 0.85f),
+                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+            )
+        )
+        Text(
+            "${(state.gradeIntensity * 100).toInt()}%",
+            color = IosYellow, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(44.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End
+        )
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Tone", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, modifier = Modifier.width(76.dp))
+        Text("Dingin", color = Color.White.copy(alpha = 0.5f), fontSize = 9.sp)
+        Slider(
+            value = state.gradeWarmth,
+            onValueChange = { state.gradeWarmth = it },
+            onValueChangeFinished = { state.persistAll() },
+            valueRange = -30f..30f,
+            modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+            colors = SliderDefaults.colors(
+                thumbColor = IosYellow,
+                activeTrackColor = Color.White.copy(alpha = 0.85f),
+                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+            )
+        )
+        Text("Hangat", color = Color.White.copy(alpha = 0.5f), fontSize = 9.sp)
+    }
+    Spacer(Modifier.height(4.dp))
     Text(
         "Diterapkan nyata pada foto saat dijepret" +
             if (android.os.Build.VERSION.SDK_INT >= 31) " dan terlihat langsung di pratinjau." else ".",
+        color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
+    )
+}
+
+/** The ƒ slider: controls Portrait background-blur strength on the segmentation path. */
+@Composable
+fun ApertureSlider(state: CameraState) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("ƒ", color = Color.White, fontSize = 20.sp)
+        Slider(
+            value = state.apertureF,
+            onValueChange = { state.apertureF = it },
+            onValueChangeFinished = { state.persistAll() },
+            valueRange = 1.4f..16f,
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+            colors = SliderDefaults.colors(
+                thumbColor = IosYellow,
+                activeTrackColor = Color.White.copy(alpha = 0.85f),
+                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+            )
+        )
+        Text(
+            String.format(Locale.US, "ƒ/%.1f", state.apertureF),
+            color = IosYellow, fontSize = 15.sp, fontWeight = FontWeight.Bold
+        )
+    }
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "Mengatur kekuatan blur latar Portrait di perangkat ini (ƒ kecil = blur kuat).",
         color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
     )
 }
@@ -326,6 +473,7 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
             SheetKind.FILTER -> "FILTER"
             SheetKind.STYLES -> "STYLES"
             SheetKind.APERTURE -> "APERTURE"
+            SheetKind.ACTION -> "ACTION"
             else -> ""
         }
         Text(title, color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -334,8 +482,18 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
             SheetKind.FLASH -> {
                 if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OptionChip("Mati", !state.videoTorch) { if (state.videoTorch) actions.onToggleTorch() }
-                        OptionChip("Nyala", state.videoTorch) { if (!state.videoTorch) actions.onToggleTorch() }
+                        OptionChip("Mati", !state.videoTorch) {
+                            if (state.videoTorch) {
+                                actions.onToggleTorch()
+                                state.showBanner("FLASH OFF")
+                            }
+                        }
+                        OptionChip("Nyala", state.videoTorch) {
+                            if (!state.videoTorch) {
+                                actions.onToggleTorch()
+                                state.showBanner("FLASH ON")
+                            }
+                        }
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(
@@ -344,9 +502,18 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                     )
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OptionChip("Auto", state.flash == FlashSetting.AUTO) { actions.onFlash(FlashSetting.AUTO) }
-                        OptionChip("On", state.flash == FlashSetting.ON) { actions.onFlash(FlashSetting.ON) }
-                        OptionChip("Off", state.flash == FlashSetting.OFF) { actions.onFlash(FlashSetting.OFF) }
+                        OptionChip("Auto", state.flash == FlashSetting.AUTO) {
+                            actions.onFlash(FlashSetting.AUTO)
+                            state.showBanner("FLASH AUTO")
+                        }
+                        OptionChip("On", state.flash == FlashSetting.ON) {
+                            actions.onFlash(FlashSetting.ON)
+                            state.showBanner("FLASH ON")
+                        }
+                        OptionChip("Off", state.flash == FlashSetting.OFF) {
+                            actions.onFlash(FlashSetting.OFF)
+                            state.showBanner("FLASH OFF")
+                        }
                     }
                 }
             }
@@ -382,10 +549,22 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
             }
             SheetKind.TIMER -> {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OptionChip("Off", state.timerSec == 0) { actions.onTimer(0) }
-                    OptionChip("3s", state.timerSec == 3) { actions.onTimer(3) }
-                    OptionChip("5s", state.timerSec == 5) { actions.onTimer(5) }
-                    OptionChip("10s", state.timerSec == 10) { actions.onTimer(10) }
+                    OptionChip("Off", state.timerSec == 0) {
+                        actions.onTimer(0)
+                        state.showBanner("TIMER OFF")
+                    }
+                    OptionChip("3s", state.timerSec == 3) {
+                        actions.onTimer(3)
+                        state.showBanner("TIMER 3S")
+                    }
+                    OptionChip("5s", state.timerSec == 5) {
+                        actions.onTimer(5)
+                        state.showBanner("TIMER 5S")
+                    }
+                    OptionChip("10s", state.timerSec == 10) {
+                        actions.onTimer(10)
+                        state.showBanner("TIMER 10S")
+                    }
                 }
             }
             SheetKind.ASPECT -> {
@@ -396,50 +575,86 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                 }
             }
             SheetKind.FILTER -> {
-                GradeChips(
+                GradeSwatches(
                     presets = FilterPresets,
                     selectedId = state.filterId,
+                    intensity = state.gradeIntensity,
                     onSelect = { id ->
                         state.filterId = id
                         if (id != null) state.styleId = null
                         state.persistAll()
                     }
                 )
+                GradeAdjustSliders(state)
             }
             SheetKind.STYLES -> {
-                GradeChips(
+                GradeSwatches(
                     presets = StylePresets,
                     selectedId = state.styleId,
+                    intensity = state.gradeIntensity,
                     onSelect = { id ->
                         state.styleId = id
                         if (id != null) state.filterId = null
                         state.persistAll()
                     }
                 )
+                GradeAdjustSliders(state)
             }
             SheetKind.APERTURE -> {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("ƒ", color = Color.White, fontSize = 20.sp)
-                    Slider(
-                        value = state.apertureF,
-                        onValueChange = { state.apertureF = it },
-                        onValueChangeFinished = { state.persistAll() },
-                        valueRange = 1.4f..16f,
-                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
-                        colors = SliderDefaults.colors(
-                            thumbColor = IosYellow,
-                            activeTrackColor = Color.White.copy(alpha = 0.85f),
-                            inactiveTrackColor = Color.White.copy(alpha = 0.25f)
-                        )
-                    )
-                    Text(
-                        String.format(Locale.US, "ƒ/%.1f", state.apertureF),
-                        color = IosYellow, fontSize = 15.sp, fontWeight = FontWeight.Bold
-                    )
+                ApertureSlider(state)
+            }
+            SheetKind.ACTION -> {
+                // Master ACTION toggle.
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OptionChip("Nonaktif", !state.actionOn) { state.actionOn = false }
+                    OptionChip("Aktif", state.actionOn) { state.actionOn = true }
                 }
-                Spacer(Modifier.height(6.dp))
+                Spacer(Modifier.height(14.dp))
                 Text(
-                    "Mengatur kekuatan blur latar Portrait di perangkat ini (ƒ kecil = blur kuat).",
+                    "EIS (GYRO)", color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(8.dp))
+                when {
+                    state.caps.gyroAvailable -> {
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            OptionChip("Nonaktif", !state.eisEnabled) {
+                                state.eisEnabled = false
+                                state.persistAll()
+                            }
+                            OptionChip("Aktif", state.eisEnabled) {
+                                state.eisEnabled = true
+                                state.persistAll()
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            if (state.mode == CamMode.SLO_MO) {
+                                "SLO-MO memakai stabilisasi hardware (API); EIS gyro berlaku untuk mode VIDEO."
+                            } else if (state.eisActive) {
+                                "EIS software (gyro) sedang aktif — pratinjau & rekaman distabilkan."
+                            } else {
+                                "EIS software (gyro) menyala otomatis saat ACTION aktif di mode VIDEO."
+                            },
+                            color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
+                        )
+                    }
+                    state.caps.videoStabilization || state.caps.oisAvailable -> {
+                        Text(
+                            "Tidak ada gyroscope — ACTION memakai stabilisasi hardware (OIS/EIS via API kamera).",
+                            color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
+                        )
+                    }
+                    else -> {
+                        Text(
+                            "Perangkat ini tidak melaporkan gyroscope maupun stabilisasi hardware.",
+                            color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Pipeline EIS maks 1920×1080 demi performa — pilihan 4K direkam sebagai 1080p saat EIS aktif (ditandai di layar). Rolling shutter tidak dikoreksi.",
                     color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
                 )
             }
@@ -448,23 +663,27 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
     }
 }
 
-/** Top card: RESOLUTION (HD/4K) + FRAME RATE (24/30/60) from real device caps.
- *  [flat] = iOS 18 skin: solid dark card, NO Liquid Glass. Default = iOS 26 glass. */
+/**
+ * RESOLUTION + FRAME RATE card. Every option up to 4K / 60fps is always
+ * visible; combinations this device does not support are dimmed and cannot
+ * be tapped (the user's explicit rule), supported ones select normally.
+ */
 @Composable
-fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifier = Modifier, flat: Boolean = false) {
-    val cardMod = if (flat) {
-        modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xF51E1E20))
-            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(14.dp))
-    } else {
+fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifier = Modifier) {
+    val resChoices = listOf(
+        VideoResOption("4K", "UHD"),
+        VideoResOption("HD", "FHD"),
+        VideoResOption("720p", "HD"),
+        VideoResOption("SD", "SD")
+    )
+    val supportedRes = state.videoResOptions.map { it.qualityName }.toSet()
+    val fpsChoices = listOf(24, 30, 60)
+    Column(
         modifier
             .clip(RoundedCornerShape(24.dp))
             .background(GlassPanelBrush)
             .border(1.dp, GlassRim, RoundedCornerShape(24.dp))
-    }
-    Column(
-        cardMod.padding(horizontal = 20.dp, vertical = 14.dp)
+            .padding(horizontal = 20.dp, vertical = 14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -472,12 +691,13 @@ fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifie
                 fontSize = 11.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.width(104.dp)
             )
-            state.videoResOptions.forEach { opt ->
-                val selected = state.videoRes?.qualityName == opt.qualityName
+            resChoices.forEach { opt ->
+                val supported = opt.qualityName in supportedRes
+                val selected = supported && state.videoRes?.qualityName == opt.qualityName
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(50))
-                        .clickable { actions.onVideoRes(opt) }
+                        .clickable(enabled = supported) { actions.onVideoRes(opt) }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -487,7 +707,11 @@ fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifie
                     }
                     Text(
                         opt.label,
-                        color = if (selected) IosYellow else Color.White,
+                        color = when {
+                            !supported -> Color.White.copy(alpha = 0.30f)
+                            selected -> IosYellow
+                            else -> Color.White
+                        },
                         fontSize = 16.sp,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
                     )
@@ -501,12 +725,13 @@ fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifie
                 fontSize = 11.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.width(104.dp)
             )
-            state.caps.fpsOptions.forEach { f ->
-                val selected = state.fps == f
+            fpsChoices.forEach { f ->
+                val supported = f in state.caps.fpsOptions
+                val selected = supported && state.fps == f
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(50))
-                        .clickable { actions.onFps(f) }
+                        .clickable(enabled = supported) { actions.onFps(f) }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -516,7 +741,11 @@ fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifie
                     }
                     Text(
                         f.toString(),
-                        color = if (selected) IosYellow else Color.White,
+                        color = when {
+                            !supported -> Color.White.copy(alpha = 0.30f)
+                            selected -> IosYellow
+                            else -> Color.White
+                        },
                         fontSize = 16.sp,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
                     )
@@ -526,13 +755,12 @@ fun ResolutionCard(state: CameraState, actions: CameraActions, modifier: Modifie
     }
 }
 
-/** Arc zoom dial (iOS 26) / horizontal strip (iOS 18). Drag horizontally to zoom. */
+/** Arc zoom dial (iOS 26). Drag horizontally to zoom. */
 @Composable
 fun ZoomDial(
     state: CameraState,
     onZoom: (Float) -> Unit,
     onDone: () -> Unit,
-    arc: Boolean,
     modifier: Modifier = Modifier
 ) {
     var startRatio by remember { mutableFloatStateOf(1f) }
@@ -549,5 +777,284 @@ fun ZoomDial(
             }
         )
     }
-    if (arc) ArcDial(state, gesture.then(modifier)) else StripDial(state, gesture.then(modifier))
+    ArcDial(state, gesture.then(modifier))
+}
+
+/**
+ * iOS-style tick adjuster (Styles TONE / WARMTH, Exposure): a row of small
+ * vertical ticks with the taller yellow centre tick marking 0. Drag
+ * horizontally; [norm] is -1..1 and maps to the control's real range.
+ */
+@Composable
+fun TickControl(
+    label: String,
+    valueText: String,
+    norm: Float,
+    onNormChange: (Float) -> Unit,
+    onDone: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        if (label.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    label,
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.width(7.dp))
+                Text(valueText, color = IosYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(5.dp))
+        }
+        androidx.compose.foundation.Canvas(
+            Modifier
+                .width(118.dp)
+                .height(24.dp)
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragEnd = { onDone() },
+                        onDragCancel = { onDone() }
+                    ) { change, drag ->
+                        change.consume()
+                        onNormChange((norm + drag / 130f).coerceIn(-1f, 1f))
+                    }
+                }
+        ) {
+            val ticks = 21
+            val stepX = size.width / (ticks - 1)
+            val centre = (ticks - 1) / 2
+            // The scale slides under a fixed yellow marker, like iOS.
+            val shift = -norm * size.width / 2f
+            for (i in 0 until ticks) {
+                val x = i * stepX + shift
+                if (x < -4f || x > size.width + 4f) continue
+                val isCentre = i == centre
+                val h = if (isCentre) size.height * 0.92f else size.height * 0.52f
+                drawLine(
+                    color = Color.White.copy(alpha = if (isCentre) 0.95f else 0.5f),
+                    start = androidx.compose.ui.geometry.Offset(x, (size.height - h) / 2f),
+                    end = androidx.compose.ui.geometry.Offset(x, (size.height + h) / 2f),
+                    strokeWidth = if (isCentre) 2.2f else 1.4f
+                )
+            }
+            // Fixed yellow centre marker.
+            drawLine(
+                color = IosYellow,
+                start = androidx.compose.ui.geometry.Offset(size.width / 2f, 0f),
+                end = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height),
+                strokeWidth = 2.4f
+            )
+        }
+    }
+}
+
+/** Style/filter name pill + page dots shown above the adjustment bar (iOS). */
+@Composable
+fun GradeLabelWithDots(kind: SheetKind, state: CameraState) {
+    val presets = if (kind == SheetKind.STYLES) StylePresets else FilterPresets
+    val activeId = if (kind == SheetKind.STYLES) state.styleId else state.filterId
+    val activeIdx = presets.indexOfFirst { it.id == activeId }
+    val label = presets.getOrNull(activeIdx)?.label?.uppercase()
+        ?: if (kind == SheetKind.STYLES) "STANDARD" else "TANPA FILTER"
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        if (kind == SheetKind.STYLES) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                presets.forEachIndexed { i, _ ->
+                    Box(
+                        Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (i == activeIdx.coerceAtLeast(0)) Color.White
+                                else Color.White.copy(alpha = 0.35f)
+                            )
+                    )
+                }
+            }
+            Spacer(Modifier.height(7.dp))
+        }
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .background(IosYellow)
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+        ) {
+            Text(label, color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+/**
+ * The iOS 26 adjustment bar that replaces the sheet card for STYLES /
+ * FILTER / EXPOSURE: a dark pill with an ✕ at the left and the real
+ * controls inside — TONE & WARMTH tick scales for Styles, the square
+ * swatch row for Filters, and the exposure tick scale with its yellow
+ * value for Exposure. Everything here writes the same real state the
+ * capture pipeline reads.
+ */
+@Composable
+fun IosAdjustBar(kind: SheetKind, state: CameraState, actions: CameraActions) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+        if (kind == SheetKind.STYLES || kind == SheetKind.FILTER) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                GradeLabelWithDots(kind, state)
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(50))
+                .background(Color(0xE62C2C30))
+                .border(1.dp, GlassRim, RoundedCornerShape(50))
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .clickable { actions.onOpenSheet(SheetKind.GRID) },
+                contentAlignment = Alignment.Center
+            ) {
+                CloseGlyph(Color.White, Modifier.size(15.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            when (kind) {
+                SheetKind.STYLES -> {
+                    TickControl(
+                        label = "TONE",
+                        valueText = (state.gradeIntensity * 100).roundToInt().toString(),
+                        norm = (state.gradeIntensity * 2f - 1f).coerceIn(-1f, 1f),
+                        onNormChange = { n ->
+                            state.gradeIntensity = ((n + 1f) / 2f).coerceIn(0f, 1f)
+                        },
+                        onDone = { state.persistAll() },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    TickControl(
+                        label = "WARMTH",
+                        valueText = state.gradeWarmth.roundToInt().toString(),
+                        norm = (state.gradeWarmth / 30f).coerceIn(-1f, 1f),
+                        onNormChange = { n -> state.gradeWarmth = n * 30f },
+                        onDone = { state.persistAll() },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                SheetKind.FILTER -> {
+                    Box(Modifier.weight(1f)) {
+                        GradeSwatches(
+                            presets = FilterPresets,
+                            selectedId = state.filterId,
+                            intensity = state.gradeIntensity,
+                            onSelect = { id ->
+                                state.filterId = id
+                                if (id != null) state.styleId = null
+                                state.persistAll()
+                            }
+                        )
+                    }
+                }
+                SheetKind.EXPOSURE -> {
+                    if (state.exposureSupported) {
+                        val range = (state.exposureMax - state.exposureMin).coerceAtLeast(1)
+                        val norm = ((state.exposureIndex - state.exposureMin).toFloat() / range) * 2f - 1f
+                        Column(
+                            Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                String.format(
+                                    Locale.US, "%+.1f",
+                                    state.exposureIndex * state.exposureStep
+                                ),
+                                color = IosYellow, fontSize = 13.sp, fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            TickControl(
+                                label = "",
+                                valueText = "",
+                                norm = norm,
+                                onNormChange = { n ->
+                                    val idx = state.exposureMin +
+                                        (((n + 1f) / 2f) * range).roundToInt()
+                                    actions.onExposure(
+                                        idx.coerceIn(state.exposureMin, state.exposureMax)
+                                    )
+                                },
+                                onDone = { }
+                            )
+                        }
+                    } else {
+                        Text(
+                            "Exposure compensation tidak didukung kamera ini.",
+                            color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                else -> Unit
+            }
+        }
+    }
+}
+
+/**
+ * Tap-to-focus reticle: yellow iOS box with centre ticks, the sun riding
+ * its right-side track with the exposure drag, and the AE/AF LOCK tag.
+ * Shared by production (CameraScreen) and the screenshot harness so both
+ * render the exact same code.
+ */
+@Composable
+fun FocusReticle(state: CameraState, modifier: Modifier = Modifier) {
+    Box(modifier) {
+        androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(92.dp)) {
+            val w = size.width
+            val sw = 1.6.dp.toPx()
+            drawRect(IosYellow, style = androidx.compose.ui.graphics.drawscope.Stroke(sw))
+            val t = w * 0.09f
+            val c = w / 2
+            drawLine(IosYellow, androidx.compose.ui.geometry.Offset(c, 0f), androidx.compose.ui.geometry.Offset(c, t), sw)
+            drawLine(IosYellow, androidx.compose.ui.geometry.Offset(c, w - t), androidx.compose.ui.geometry.Offset(c, w), sw)
+            drawLine(IosYellow, androidx.compose.ui.geometry.Offset(0f, c), androidx.compose.ui.geometry.Offset(t, c), sw)
+            drawLine(IosYellow, androidx.compose.ui.geometry.Offset(w - t, c), androidx.compose.ui.geometry.Offset(w, c), sw)
+        }
+        val sunNorm = if (state.exposureSupported) {
+            (state.exposureIndex - state.exposureMin).toFloat() /
+                (state.exposureMax - state.exposureMin).coerceAtLeast(1)
+        } else 0.5f
+        Box(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .offset(x = 21.dp)
+                .width(1.5.dp)
+                .height(56.dp)
+                .background(IosYellow.copy(alpha = 0.55f))
+        )
+        SunGlyph(
+            IosYellow,
+            Modifier
+                .size(17.dp)
+                .align(Alignment.CenterEnd)
+                .offset(x = 29.dp, y = ((0.5f - sunNorm) * 52).dp)
+        )
+        if (state.focusLocked) {
+            Text(
+                "AE/AF LOCK",
+                color = Color.Black,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .offset(y = (-20).dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(IosYellow)
+                    .padding(horizontal = 5.dp, vertical = 2.dp)
+            )
+        }
+    }
 }

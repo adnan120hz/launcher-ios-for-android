@@ -90,6 +90,16 @@ class CameraController(private val context: Context) {
     val recordingActive: Boolean get() = recording != null
     val videoReady: Boolean get() = videoCapture != null
 
+    /** Release the camera completely (the EIS GL pipeline takes over). */
+    fun unbindAll() {
+        try {
+            provider?.unbindAll()
+        } catch (e: Throwable) { /* already unbound */ }
+        camera = null
+        imageCapture = null
+        videoCapture = null
+    }
+
     suspend fun initProvider(): ProcessCameraProvider {
         provider?.let { return it }
         val p = ProcessCameraProvider.getInstance(context).awaitValue(mainExecutor)
@@ -189,8 +199,8 @@ class CameraController(private val context: Context) {
             // supported preview size by how close its aspect ratio is to the
             // DISPLAY's aspect ratio, then by closeness to the display's pixel
             // count, so the viewfinder fills this phone's screen with the
-            // correct crop — never stretched, never a fixed one-size buffer.
-            // Slight penalty above 2560 on the long edge keeps weak GPUs cool.
+            // correct crop at the display's own resolution — never
+            // stretched, never a fixed one-size buffer.
             val screenLong = maxOf(screenW, screenH).coerceAtLeast(1)
             val screenShort = minOf(screenW, screenH).coerceAtLeast(1)
             val screenAspect = screenLong.toDouble() / screenShort.toDouble()
@@ -203,8 +213,7 @@ class CameraController(private val context: Context) {
                         val aspectScore = kotlin.math.abs(kotlin.math.ln((long.toDouble() / short.toDouble()) / screenAspect))
                         val area = s.width.toDouble() * s.height.toDouble()
                         val areaScore = kotlin.math.abs(kotlin.math.ln(area / screenArea))
-                        val heatPenalty = if (long > 2560) 0.75 else 0.0
-                        aspectScore * 2.0 + areaScore + heatPenalty
+                        aspectScore * 2.0 + areaScore
                     }
                 }
                 .build()
@@ -406,11 +415,18 @@ class CameraController(private val context: Context) {
                     when {
                         portraitStrength != null ->
                             PortraitProcessor.process(bmp, portraitStrength) { result ->
+                                // Portrait lighting grades the composited
+                                // portrait for real (same matrix pipeline).
+                                val graded = if (gradeMatrix != null) {
+                                    applyGrade(result ?: bmp, gradeMatrix)
+                                } else {
+                                    result ?: bmp
+                                }
                                 if (result != null) {
-                                    finish(result)
+                                    finish(graded)
                                 } else {
                                     // Honest fallback: keep the photo, say so.
-                                    finish(bmp, "Subjek tidak terdeteksi jelas — foto disimpan tanpa blur latar")
+                                    finish(graded, "Subjek tidak terdeteksi jelas — foto disimpan tanpa blur latar")
                                 }
                             }
                         gradeMatrix != null -> finish(applyGrade(bmp, gradeMatrix))

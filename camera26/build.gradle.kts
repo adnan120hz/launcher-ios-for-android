@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    id("app.cash.paparazzi") version "1.3.5"
 }
 
 android {
@@ -12,8 +13,8 @@ android {
         applicationId = "net.adnan120hz.camera26"
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.5.0"
     }
 
     buildTypes {
@@ -51,4 +52,8 @@ dependencies {
     // ML Kit selfie segmentation: powers the real Portrait fallback
     // (background blur) on devices whose OEM ships no BOKEH extension.
     implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+
+    // Paparazzi: renders the real Compose UI to PNG screenshots on the JVM
+    // (used to verify camera UI states without a physical device).
+    testImplementation("app.cash.paparazzi:paparazzi:1.3.5")
 }

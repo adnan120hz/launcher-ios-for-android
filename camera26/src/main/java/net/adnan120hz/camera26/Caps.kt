@@ -33,7 +33,11 @@ data class DeviceCaps(
     /** True when an AVC encoder usable for the time-lapse pipeline exists. */
     val timelapseAvailable: Boolean = false,
     /** True when CONTROL_VIDEO_STABILIZATION_MODE_ON is supported (Action mode). */
-    val videoStabilization: Boolean = false
+    val videoStabilization: Boolean = false,
+    /** True when the lens reports hardware optical stabilization (OIS). */
+    val oisAvailable: Boolean = false,
+    /** True when the device has a real gyroscope (software gyro-EIS input). */
+    val gyroAvailable: Boolean = false
 )
 
 fun formatRatioLabel(ratio: Float): String =
@@ -135,6 +139,18 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
     val stabModes = logical.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
     val stab = stabModes?.any { it == 1 } == true // 1 = CONTROL_VIDEO_STABILIZATION_MODE_ON
 
+    // Hardware optical stabilization (OIS): 1 = LENS_OPTICAL_STABILIZATION_ON.
+    val oisModes = logical.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+    val ois = oisModes?.any { it == 1 } == true
+
+    // A real gyroscope sensor is the input for the software gyro-EIS pipeline.
+    val gyro = try {
+        (context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager)
+            ?.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) != null
+    } catch (e: Throwable) {
+        false
+    }
+
     return DeviceCaps(
         backSessions = sortedSessions,
         baseEqMm = baseEq,
@@ -144,7 +160,9 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
         hasFlashUnit = tier1,
         sloMoFps = sloMax,
         timelapseAvailable = avcEncoderAvailable(),
-        videoStabilization = stab
+        videoStabilization = stab,
+        oisAvailable = ois,
+        gyroAvailable = gyro
     )
 }
 

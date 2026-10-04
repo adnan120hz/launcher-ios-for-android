@@ -11,8 +11,12 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Size
+import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -37,10 +41,12 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -51,6 +57,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -199,6 +206,20 @@ private fun CameraScreenContent() {
     val modePulse = remember { Animatable(0f) }
     var timelapseEncoder by remember { mutableStateOf<TimelapseEncoder?>(null) }
     var timelapseFile by remember { mutableStateOf<File?>(null) }
+
+    // Software gyro EIS (ACTION): the GL pipeline owns the camera while it
+    // is live; CameraX stays unbound in that window.
+    var eisPipeline by remember { mutableStateOf<EisPipeline?>(null) }
+    var eisSurface by remember { mutableStateOf<Surface?>(null) }
+    var eisSurfaceSize by remember { mutableStateOf(0 to 0) }
+    var eisFacing by remember { mutableStateOf(state.facingFront) }
+    val eisWanted = state.mode == CamMode.VIDEO && state.actionOn && state.eisEnabled &&
+        state.caps.gyroAvailable && !state.eisFailed
+    // A shutter tap that lands while the EIS pipeline is still spinning up
+    // (or whose encoder start failed) is parked here and resolved on the
+    // EIS / plain path as soon as either is ready — the tap is never dropped.
+    var pendingEisRecord by remember { mutableStateOf(false) }
+    var pendingFallbackRecord by remember { mutableStateOf(false) }
     var lastZoomStopIdx by remember { mutableStateOf(-1) }
 
     val micLauncher = rememberLauncherForActivityResult(
@@ -239,11 +260,14 @@ private fun CameraScreenContent() {
             state.mode == CamMode.PORTRAIT &&
             state.extensionMode != androidx.camera.extensions.ExtensionMode.BOKEH
         ) state.apertureStrength else null
-        // FILTER / STYLES: a real colour grade baked into the captured photo.
-        val grade = if (state.mode == CamMode.PHOTO) state.activeGrade() else null
+        // FILTER / STYLES / PORTRAIT-lighting: a real colour grade (with the
+        // user's intensity / warmth adjustments) baked into the photo.
+        val gradeMatrix = if (
+            state.mode == CamMode.PHOTO || state.mode == CamMode.PORTRAIT
+        ) state.activeGradeMatrix() else null
         controller.takePhoto(
             squareCrop = state.aspect == PhotoAspect.SQUARE,
-            gradeMatrix = grade?.matrix,
+            gradeMatrix = gradeMatrix,
             portraitStrength = portraitStrength,
             onSaved = { refreshThumb() },
             onError = { msg -> state.toast = msg },
@@ -275,16 +299,162 @@ private fun CameraScreenContent() {
         state.isRecording = false
     }
 
+    // --- Software gyro EIS (ACTION) ------------------------------------------
+    // The pipeline's hard cap is 1920x1080: a 4K selection records 1080p and
+    // the UI flags that (state.eisCapped). Encoder failure drops back to the
+    // plain CameraX path so a recording is never lost to EIS.
+    fun eisRecordSize(): Pair<Int, Int> = when (state.videoRes?.qualityName) {
+        "UHD", "FHD" -> 1920 to 1080
+        "HD" -> 1280 to 720
+        else -> 854 to 480
+    }
+
+    fun startEisRecording() {
+        val pipeline = eisPipeline
+        if (pipeline == null || !state.eisActive) {
+            state.toast = "EIS belum siap"
+            return
+        }
+        val (w, h) = eisRecordSize()
+        if (pipeline.startRecording(state.micGranted, w, h)) {
+            state.isRecording = true
+            state.recordSeconds = 0
+        } else {
+            state.eisFailed = true
+            // The tap is not lost: it continues on the plain CameraX path
+            // as soon as that is bound again (see the resolver effects).
+            pendingFallbackRecord = true
+            state.toast = "EIS gagal mulai di perangkat ini — memakai rekam biasa"
+        }
+    }
+
+    fun stopEisRecording() {
+        eisPipeline?.stopRecording()
+        state.isRecording = false
+    }
+
+    // --- Panorama: guided sweep -> cylindrical stitch -----------------------
+    val pano = remember { PanoEngine(context) }
+    val panoRt = remember { PanoRuntime() }
+
+    fun capturePanoFrame(yaw: Float) {
+        if (panoRt.captureBusy) return
+        panoRt.captureBusy = true
+        val hfov = cameraHfovDeg(context, state.facingFront, state.zoomRatio)
+        controller.captureBitmap { bmp ->
+            panoRt.captureBusy = false
+            if (bmp == null) return@captureBitmap
+            if (!state.panoSweeping) {
+                try { bmp.recycle() } catch (e: Throwable) { /* already gone */ }
+                return@captureBitmap
+            }
+            val scaled = PanoStitcher.downscale(bmp, PANO_WORK_H)
+            pano.addFrame(PanoFrame(scaled, yaw, hfov))
+            state.panoFrameCount = pano.frameCount
+        }
+    }
+
+    fun startPano() {
+        if (state.panoSweeping || state.panoStitching ||
+            state.isRecording || state.timelapseRunning
+        ) {
+            return
+        }
+        pano.discardFrames()
+        val gyroOk = state.caps.gyroAvailable
+        pano.start(gyroOk)
+        panoRt.reset(pano.yawDeg())
+        state.panoSweeping = true
+        state.panoProgress = 0f
+        state.panoFrameCount = 0
+        state.panoTooFast = false
+        state.panoDirRight = true
+        capturePanoFrame(panoRt.lastCaptureYaw)
+        if (!gyroOk) {
+            // Honest gate: no gyroscope -> timed captures, same guide.
+            state.toast =
+                "Gyroscope tidak ada — panorama memakai tangkapan interval waktu"
+        }
+    }
+
+    fun finishPano() {
+        if (!state.panoSweeping) return
+        state.panoSweeping = false
+        pano.stop()
+        val frames = pano.takeFrames()
+        state.panoFrameCount = 0
+        state.panoProgress = 0f
+        state.panoTooFast = false
+        if (frames.size < 2) {
+            frames.forEach { try { it.bmp.recycle() } catch (e: Throwable) { /* gone */ } }
+            state.toast = "Panorama terlalu pendek — geser lebih jauh"
+            return
+        }
+        state.panoStitching = true
+        scope.launch(Dispatchers.Default) {
+            val stitched = try {
+                PanoStitcher.stitch(frames)
+            } catch (e: Throwable) {
+                null
+            }
+            if (stitched != null) {
+                val uri = PanoSaver.saveJpeg(context, stitched)
+                try { stitched.recycle() } catch (e: Throwable) { /* gone */ }
+                frames.forEach { try { it.bmp.recycle() } catch (e: Throwable) { /* gone */ } }
+                withContext(Dispatchers.Main) {
+                    state.panoStitching = false
+                    if (uri != null) {
+                        refreshThumb()
+                        state.toast = "Panorama tersimpan"
+                    } else {
+                        state.toast = "Panorama gagal disimpan"
+                    }
+                }
+            } else {
+                // Honest fallback: keep the middle (best-aimed) frame.
+                val uri = PanoSaver.saveJpeg(context, frames[frames.size / 2].bmp)
+                frames.forEach { try { it.bmp.recycle() } catch (e: Throwable) { /* gone */ } }
+                withContext(Dispatchers.Main) {
+                    state.panoStitching = false
+                    if (uri != null) {
+                        refreshThumb()
+                        state.toast = "Jahitan panorama gagal — disimpan foto terbaik"
+                    } else {
+                        state.toast = "Panorama gagal disimpan"
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelPano() {
+        if (!state.panoSweeping) return
+        state.panoSweeping = false
+        pano.stop()
+        pano.discardFrames()
+        state.panoProgress = 0f
+        state.panoFrameCount = 0
+        state.panoTooFast = false
+        state.toast = "Panorama dibatalkan"
+    }
+
     // --- Time-lapse: real interval capture -> MP4 ---------------------------
     suspend fun captureBitmapSuspend(): Bitmap? = suspendCancellableCoroutine { cont ->
         controller.captureBitmap { bmp -> if (cont.isActive) cont.resume(bmp) }
     }
 
     fun startTimelapse() {
+        // Output size follows the chosen video resolution (the top-left pill).
+        val longSide = when (state.videoRes?.qualityName) {
+            "UHD", "FHD" -> 1920
+            "HD" -> 1280
+            "SD" -> 854
+            else -> 1920
+        }
         val (fw, fh) = when (state.aspect) {
-            PhotoAspect.RATIO_16_9 -> 1920 to 1080
-            PhotoAspect.RATIO_4_3 -> 1440 to 1080
-            PhotoAspect.SQUARE -> 1080 to 1080
+            PhotoAspect.RATIO_16_9 -> longSide to (longSide * 9 / 16)
+            PhotoAspect.RATIO_4_3 -> (longSide * 3 / 4) to (longSide * 9 / 16)
+            PhotoAspect.SQUARE -> minOf(longSide, 1080) to minOf(longSide, 1080)
         }
         val file = File(context.cacheDir, "timelapse_${System.currentTimeMillis()}.mp4")
         val enc = TimelapseEncoder(file)
@@ -336,7 +506,7 @@ private fun CameraScreenContent() {
         } else {
             t.coerceIn(
                 state.dialMin.coerceAtLeast(0.1f),
-                state.dialMax.coerceAtMost(100f)
+                state.dialMax.coerceAtMost(40f)
             )
         }
     }
@@ -374,8 +544,8 @@ private fun CameraScreenContent() {
     }
 
     fun selectMode(m: CamMode) {
-        if (state.isRecording || state.timelapseRunning || m == state.mode) return
-        // Unavailable modes are never rendered, so this is only a guard.
+        if (state.isRecording || state.timelapseRunning || state.panoSweeping || m == state.mode) return
+        // Unavailable modes render dimmed in the carousel; selecting is a no-op.
         if (!state.modeAvailable(m)) return
         state.mode = m
         state.sheet = SheetKind.NONE
@@ -400,9 +570,20 @@ private fun CameraScreenContent() {
         onShutterTap = {
             when {
                 state.timelapseRunning -> stopTimelapse()
-                state.isRecording -> stopRecording()
+                state.isRecording ->
+                    if (eisPipeline?.recording == true) stopEisRecording() else stopRecording()
+                state.panoSweeping -> finishPano()
+                state.mode == CamMode.PANO -> startPano()
                 state.mode == CamMode.TIME_LAPSE -> startTimelapse()
-                state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO -> startRecording()
+                state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO ->
+                    when {
+                        state.eisActive -> startEisRecording()
+                        // Pipeline still spinning up: park the tap; the
+                        // resolver effects start the recording the moment
+                        // the pipeline (or the fallback) is ready.
+                        eisWanted -> pendingEisRecord = true
+                        else -> startRecording()
+                    }
                 else -> {
                     if (state.countdown != null) state.countdown = null
                     else if (state.timerSec > 0) state.countdown = state.timerSec
@@ -423,8 +604,11 @@ private fun CameraScreenContent() {
             }
         },
         onFlip = {
+            if (state.panoSweeping) cancelPano()
             if (state.timelapseRunning) stopTimelapse()
-            if (state.isRecording) stopRecording()
+            if (state.isRecording) {
+                if (eisPipeline?.recording == true) stopEisRecording() else stopRecording()
+            }
             state.facingFront = !state.facingFront
             state.desiredSessionId = null
             state.currentSessionRatio = 1f
@@ -464,12 +648,6 @@ private fun CameraScreenContent() {
             state.gridOn = !state.gridOn
             state.persistAll()
         },
-        onUiStyle = { style ->
-            state.uiStyle = style
-            state.sheet = SheetKind.NONE
-            state.trayOpen = false
-            state.persistAll()
-        },
         onToggleNight = {
             if (state.mode != CamMode.PHOTO) {
                 state.toast = "Night Mode untuk mode Photo"
@@ -492,7 +670,7 @@ private fun CameraScreenContent() {
                 }
             }
         },
-        onToggleTray = { state.trayOpen = !state.trayOpen }
+        onPanoCancel = { cancelPano() }
     )
 
     // ------------------------------------------------------------ init
@@ -559,11 +737,12 @@ private fun CameraScreenContent() {
     val extMode = state.extensionMode
     val bindKey = listOf(
         state.facingFront, state.desiredSessionId, extMode,
-        state.aspect, state.videoRes?.qualityName
+        state.aspect, state.videoRes?.qualityName, state.eisActive, state.eisFailed
     ).joinToString("|")
     LaunchedEffect(bindKey, previewView, state.capsReady) {
         val pv = previewView ?: return@LaunchedEffect
         if (!state.capsReady) return@LaunchedEffect
+        if (state.eisActive) return@LaunchedEffect // EIS GL pipeline owns the camera
         if (controller.recordingActive) controller.stopRecording()
         state.isRecording = false
         val ok = controller.bind(
@@ -609,6 +788,136 @@ private fun CameraScreenContent() {
     }
 
     // ------------------------------------------------------------ effects
+    // Software gyro EIS lifecycle: while wanted, CameraX unbinds and the GL
+    // pipeline owns the camera. Any pipeline failure latches eisFailed and
+    // the normal CameraX path (hardware stabilization / plain recording)
+    // takes over again — never a dead viewfinder.
+    LaunchedEffect(eisWanted, state.facingFront, eisSurface, eisSurfaceSize) {
+        if (eisWanted) {
+            val surface = eisSurface ?: return@LaunchedEffect
+            val (sw, sh) = eisSurfaceSize
+            if (sw <= 0 || sh <= 0) return@LaunchedEffect
+            if (state.eisActive && eisFacing == state.facingFront) {
+                eisPipeline?.updatePreviewSize(sw, sh)
+                return@LaunchedEffect
+            }
+            eisPipeline?.stop()
+            eisPipeline = null
+            if (controller.recordingActive) controller.stopRecording()
+            controller.unbindAll()
+            state.sessionBound = false
+            val pipeline = EisPipeline(context)
+            eisPipeline = pipeline
+            eisFacing = state.facingFront
+            pipeline.listener = object : EisPipeline.Listener {
+                override fun onStarted() {
+                    state.eisActive = true
+                    state.bindError = null
+                    pipeline.setZoom(state.zoomRatio)
+                    pipeline.setTorch(state.videoTorch)
+                }
+
+                override fun onFailed(reason: String) {
+                    state.eisActive = false
+                    state.eisFailed = true
+                    state.toast =
+                        "EIS software tidak dapat jalan — memakai stabilisasi/rekam bawaan"
+                }
+
+                override fun onRecordingSaved(uri: Uri) {
+                    state.isRecording = false
+                    refreshThumb()
+                }
+
+                override fun onRecordingFailed() {
+                    state.isRecording = false
+                    state.toast = "Rekaman EIS gagal disimpan"
+                }
+            }
+            pipeline.start(surface, sw, sh, state.facingFront)
+        } else {
+            if (eisPipeline != null) {
+                eisPipeline?.stop()
+                eisPipeline = null
+            }
+            state.eisActive = false
+        }
+    }
+
+    // Parked-tap resolvers (see pendingEisRecord / pendingFallbackRecord):
+    // start the recording as soon as whichever path survived is ready.
+    LaunchedEffect(state.eisActive, state.eisFailed) {
+        if (pendingEisRecord && state.eisActive) {
+            pendingEisRecord = false
+            startEisRecording()
+        } else if (pendingEisRecord && state.eisFailed) {
+            pendingEisRecord = false
+            pendingFallbackRecord = true
+        }
+    }
+
+    LaunchedEffect(state.sessionBound, state.eisFailed) {
+        if (pendingFallbackRecord && state.eisFailed &&
+            state.sessionBound && !state.isRecording
+        ) {
+            pendingFallbackRecord = false
+            startRecording()
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            eisPipeline?.stop()
+            pano.stop()
+        }
+    }
+
+    // Panorama sweep pump: poll the yaw, drive the guide (progress,
+    // direction, too-fast warning) and trigger a capture every
+    // PANO_STEP_DEG of pan travel; finishing is automatic at the target
+    // sweep or the frame cap.
+    LaunchedEffect(state.panoSweeping) {
+        if (!state.panoSweeping) return@LaunchedEffect
+        var lastPollNs = SystemClock.elapsedRealtimeNanos()
+        while (state.panoSweeping) {
+            delay(40)
+            val yaw = pano.yawDeg()
+            val nowNs = SystemClock.elapsedRealtimeNanos()
+            val dt = ((nowNs - lastPollNs) / 1e9f).coerceIn(0.01f, 0.2f)
+            lastPollNs = nowNs
+            val vel = (yaw - panoRt.lastYaw) / dt
+            panoRt.yawVelEma = panoRt.yawVelEma * 0.8f + vel * 0.2f
+            state.panoTooFast = abs(panoRt.yawVelEma) > PANO_TOO_FAST_DEG_S
+            if (!panoRt.dirLocked && abs(yaw - panoRt.startYaw) > 3f) {
+                panoRt.dirLocked = true
+                panoRt.dirSign = if (yaw >= panoRt.startYaw) 1f else -1f
+                state.panoDirRight = panoRt.dirSign > 0f
+            }
+            if (yaw < panoRt.minYaw) panoRt.minYaw = yaw
+            if (yaw > panoRt.maxYaw) panoRt.maxYaw = yaw
+            state.panoProgress =
+                ((panoRt.maxYaw - panoRt.minYaw) / PANO_TARGET_DEG).coerceIn(0f, 1f)
+            if (!panoRt.captureBusy &&
+                abs(yaw - panoRt.lastCaptureYaw) >= PANO_STEP_DEG
+            ) {
+                panoRt.lastCaptureYaw = yaw
+                capturePanoFrame(yaw)
+            }
+            panoRt.lastYaw = yaw
+            if (state.panoProgress >= 1f || pano.frameCount >= PANO_MAX_FRAMES) {
+                finishPano()
+            }
+        }
+    }
+
+    LaunchedEffect(state.zoomRatio, state.eisActive) {
+        if (state.eisActive) eisPipeline?.setZoom(state.zoomRatio)
+    }
+
+    LaunchedEffect(state.videoTorch, state.eisActive) {
+        if (state.eisActive) eisPipeline?.setTorch(state.videoTorch)
+    }
+
     LaunchedEffect(state.exposureIndex) { controller.setExposure(state.exposureIndex) }
 
     LaunchedEffect(state.mode, state.fps, state.caps.sloMoFps) {
@@ -673,6 +982,14 @@ private fun CameraScreenContent() {
         state.toast = null
     }
 
+    // Status banner auto-dismiss (~1.5 s, like iOS).
+    LaunchedEffect(state.bannerNonce) {
+        if (state.bannerText != null) {
+            delay(1500)
+            state.bannerText = null
+        }
+    }
+
     LaunchedEffect(state.isRecording) {
         if (state.isRecording) {
             state.recordSeconds = 0
@@ -720,56 +1037,131 @@ private fun CameraScreenContent() {
             firstModeEffect = false
             return@LaunchedEffect
         }
-        state.modeStripVisible = true
         // iOS-like mode crossfade: a brief dim pulse over the viewfinder.
         scope.launch {
             modePulse.snapTo(0.30f)
-            modePulse.animateTo(0f, tween(260))
+            modePulse.animateTo(0f, tween(150))
         }
-        delay(1500)
-        state.modeStripVisible = false
     }
 
     fun handleFocus(off: Offset, lock: Boolean) {
-        val pv = previewView ?: return
         state.focusPoint = off
         state.focusLocked = lock
         state.focusNonce += 1
         exposureAcc = 0f
+        if (state.eisActive) {
+            // Real AF/AE metering regions in the EIS pipeline's Camera2 session.
+            eisPipeline?.tapToFocus(
+                off.x / screenSizePx.first.coerceAtLeast(1),
+                off.y / screenSizePx.second.coerceAtLeast(1)
+            )
+            return
+        }
+        val pv = previewView ?: return
         try {
             controller.startFocus(pv.meteringPointFactory.createPoint(off.x, off.y), lock)
         } catch (e: Throwable) { /* metering unsupported */ }
     }
 
     // ------------------------------------------------------------ UI
-    val activeGrade = state.activeGrade()
+    val activeGradeMatrix = state.activeGradeMatrix()
+    val screenCfg = LocalConfiguration.current
+    val letterboxedMode = state.mode == CamMode.PHOTO || state.mode == CamMode.PORTRAIT ||
+        state.mode == CamMode.TIME_LAPSE
+    // Preview region: everything above the solid-black control strip
+    // (strip content height + this device's navigation-bar inset). The
+    // shutter and mode pill live on that strip, never over the preview.
+    val screenDensity = LocalDensity.current
+    val navBottomDp = with(screenDensity) {
+        WindowInsets.navigationBars.getBottom(screenDensity).toDp().value
+    }
+    val previewRegionH = (
+        screenCfg.screenHeightDp.toFloat() - BOTTOM_STRIP_HEIGHT_DP - navBottomDp
+        ).coerceAtLeast(1f)
+    val previewArea = previewAreaDp(
+        aspect = state.aspect,
+        filled = state.previewFilled,
+        letterboxedMode = letterboxedMode,
+        screenW = screenCfg.screenWidthDp.toFloat(),
+        screenH = previewRegionH
+    )
+    val isFullBleed = previewArea.first >= screenCfg.screenWidthDp.toFloat() - 0.5f &&
+        previewArea.second >= previewRegionH - 0.5f
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        // Preview. COMPATIBLE (TextureView) so the live FILTER/STYLES grade
-        // can be previewed via a RenderEffect colour filter on API 31+;
-        // FILL_CENTER crops to this screen's aspect — never stretched.
+        // Preview region (above the black control strip). COMPATIBLE
+        // (TextureView) so the live FILTER/STYLES grade can be previewed
+        // via a RenderEffect colour filter on API 31+; FILL_CENTER crops
+        // to the preview area's aspect — never stretched. A small capture
+        // aspect (4:3 / 1:1) letterboxes the preview at the region's bottom
+        // edge with real black above it, merging into the strip below;
+        // the ⤢ button flips it to fill the region. 16:9 fills the region.
+        Box(Modifier.fillMaxWidth().height(previewRegionH.dp)) {
         Box(
-            if (activeGrade != null && Build.VERSION.SDK_INT >= 31) {
-                Modifier.fillMaxSize().graphicsLayer {
+            if (activeGradeMatrix != null && Build.VERSION.SDK_INT >= 31) {
+                Modifier.graphicsLayer {
                     renderEffect = android.graphics.RenderEffect.createColorFilterEffect(
                         android.graphics.ColorMatrixColorFilter(
-                            android.graphics.ColorMatrix(activeGrade.matrix)
+                            android.graphics.ColorMatrix(activeGradeMatrix)
                         )
                     ).asComposeRenderEffect()
                 }
             } else {
-                Modifier.fillMaxSize()
-            }
-        ) {
-            AndroidView(
-                factory = { ctx ->
-                    PreviewView(ctx).apply {
-                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                        scaleType = PreviewView.ScaleType.FILL_CENTER
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-                update = { pv -> if (previewView !== pv) previewView = pv }
+                Modifier
+            }.then(
+                if (isFullBleed) {
+                    Modifier.fillMaxSize()
+                } else {
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .size(previewArea.first.dp, previewArea.second.dp)
+                }
             )
+        ) {
+            if (eisWanted || state.eisActive) {
+                // ACTION gyro-EIS: the GL pipeline's own preview surface;
+                // the warped (stabilized) output shows before recording.
+                AndroidView(
+                    factory = { ctx ->
+                        SurfaceView(ctx).apply {
+                            holder.addCallback(object : SurfaceHolder.Callback {
+                                override fun surfaceCreated(h: SurfaceHolder) {
+                                    eisSurface = h.surface
+                                    val f = h.surfaceFrame
+                                    eisSurfaceSize = f.width() to f.height()
+                                }
+
+                                override fun surfaceChanged(
+                                    h: SurfaceHolder,
+                                    format: Int,
+                                    w: Int,
+                                    ht: Int
+                                ) {
+                                    eisSurface = h.surface
+                                    eisSurfaceSize = w to ht
+                                }
+
+                                override fun surfaceDestroyed(h: SurfaceHolder) {
+                                    eisSurface = null
+                                    eisSurfaceSize = 0 to 0
+                                }
+                            })
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                AndroidView(
+                    factory = { ctx ->
+                        PreviewView(ctx).apply {
+                            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                            scaleType = PreviewView.ScaleType.FILL_CENTER
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                    update = { pv -> if (previewView !== pv) previewView = pv }
+                )
+            }
+        }
         }
 
         // Mode-change pulse: a brief dim, like the iOS viewfinder crossfade.
@@ -781,13 +1173,6 @@ private fun CameraScreenContent() {
             )
         }
 
-        // Effective capture area: like iOS, everything outside the chosen
-        // aspect is dimmed, so 4:3 / 16:9 / 1:1 visibly reshape the preview
-        // area relative to this phone's screen.
-        if (state.mode == CamMode.PHOTO || state.mode == CamMode.PORTRAIT) {
-            AspectBands(state.aspect)
-        }
-
         // Gesture layer (below all controls).
         Box(
             Modifier
@@ -797,8 +1182,6 @@ private fun CameraScreenContent() {
                         onTap = { off ->
                             if (state.sheet != SheetKind.NONE) {
                                 state.sheet = SheetKind.NONE
-                            } else if (state.trayOpen) {
-                                state.trayOpen = false
                             } else {
                                 handleFocus(off, lock = false)
                             }
@@ -808,7 +1191,7 @@ private fun CameraScreenContent() {
                 }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, _, zoomChange, _ ->
-                        if (!state.isRecording && state.sheet == SheetKind.NONE && !state.trayOpen) {
+                        if (!state.isRecording && state.sheet == SheetKind.NONE) {
                             state.dialVisible = true
                             setZoomTarget(state.zoomTarget * zoomChange)
                         }
@@ -820,8 +1203,7 @@ private fun CameraScreenContent() {
                         onDragStart = { total = 0f },
                         onHorizontalDrag = { _, drag -> total += drag },
                         onDragEnd = {
-                            // Never hijack iOS 18 tray scrolling into a mode swipe.
-                            if (abs(total) > 70f && state.sheet == SheetKind.NONE && !state.trayOpen) {
+                            if (abs(total) > 70f && state.sheet == SheetKind.NONE) {
                                 swipeMode(if (total < 0) 1 else -1)
                             }
                         },
@@ -842,9 +1224,9 @@ private fun CameraScreenContent() {
                 }
         )
 
-        // Grid overlay.
+        // Grid overlay (preview region only — never over the black strip).
         if (state.gridOn) {
-            Canvas(Modifier.fillMaxSize()) {
+            Canvas(Modifier.fillMaxWidth().height(previewRegionH.dp)) {
                 val w = size.width
                 val h = size.height
                 val col = Color.White.copy(alpha = 0.22f)
@@ -867,35 +1249,7 @@ private fun CameraScreenContent() {
                     .size(92.dp)
                     .scale(focusScale.value)
             ) {
-                Canvas(Modifier.fillMaxSize()) {
-                    val w = size.width
-                    val sw = 1.6.dp.toPx()
-                    drawRect(IosYellow, style = Stroke(sw))
-                    val t = w * 0.09f
-                    val c = w / 2
-                    drawLine(IosYellow, Offset(c, 0f), Offset(c, t), sw)
-                    drawLine(IosYellow, Offset(c, w - t), Offset(c, w), sw)
-                    drawLine(IosYellow, Offset(0f, c), Offset(t, c), sw)
-                    drawLine(IosYellow, Offset(w - t, c), Offset(w, c), sw)
-                }
-                SunGlyph(
-                    IosYellow,
-                    Modifier.size(17.dp).align(Alignment.CenterEnd).offset(x = 24.dp)
-                )
-                if (state.focusLocked) {
-                    Text(
-                        "AE/AF LOCK",
-                        color = Color.Black,
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .offset(y = (-20).dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(IosYellow)
-                            .padding(horizontal = 5.dp, vertical = 2.dp)
-                    )
-                }
+                FocusReticle(state, Modifier.fillMaxSize())
             }
         }
 
@@ -955,11 +1309,12 @@ private fun CameraScreenContent() {
             }
         }
 
-        // Controls.
-        if (state.uiStyle == UiStyle.IOS26) {
-            Controls26(state, actions)
-        } else {
-            Controls18(state, actions)
+        // Controls (single iOS 26 UI).
+        Controls26(state, actions)
+
+        // In-app Settings & Info (credits / license / developer).
+        if (state.settingsOpen) {
+            CameraSettingsScreen(state, onBack = { state.settingsOpen = false })
         }
 
         // Countdown.
@@ -1001,40 +1356,31 @@ private fun CameraScreenContent() {
 }
 
 /**
- * Dimmed bands outside the effective capture area for the selected aspect,
- * computed from THIS screen's real proportions — like iOS, where choosing
- * 4:3 or 1:1 visibly shrinks the live preview area instead of stretching it.
+ * Size (dp) of the live preview area inside the preview region (the screen
+ * above the black control strip). Full region unless a small aspect
+ * (4:3 / 1:1) letterboxes the preview in a photo-family mode and the user
+ * has not expanded it with the ⤢ button — then the area follows the
+ * aspect's long:short ratio and sits at the region's bottom edge, with the
+ * black background showing above it, exactly like iOS.
  */
-@Composable
-private fun BoxScope.AspectBands(aspect: PhotoAspect) {
-    val cfg = LocalConfiguration.current
-    val sw = cfg.screenWidthDp.toFloat()
-    val sh = cfg.screenHeightDp.toFloat()
-    val longSide = maxOf(sw, sh)
-    val shortSide = minOf(sw, sh)
-    if (shortSide <= 0f) return
-    val screenRatio = longSide / shortSide
-    val target = when (aspect) {
+internal fun previewAreaDp(
+    aspect: PhotoAspect,
+    filled: Boolean,
+    letterboxedMode: Boolean,
+    screenW: Float,
+    screenH: Float
+): Pair<Float, Float> {
+    if (!letterboxedMode || filled) return screenW to screenH
+    val ratio = when (aspect) {
         PhotoAspect.RATIO_4_3 -> 4f / 3f
-        PhotoAspect.RATIO_16_9 -> 16f / 9f
         PhotoAspect.SQUARE -> 1f
+        PhotoAspect.RATIO_16_9 -> return screenW to screenH
     }
-    // Aspect wider than (or equal to) the screen: preview already matches.
-    if (target >= screenRatio - 0.02f) return
-    val band = ((longSide - shortSide * target) / 2f).coerceAtLeast(0f)
-    if (band <= 0f) return
-    val color = Color.Black.copy(alpha = 0.55f)
-    if (sh >= sw) {
-        Box(Modifier.fillMaxWidth().height(band.dp).background(color))
-        Box(
-            Modifier.fillMaxWidth().height(band.dp)
-                .align(Alignment.BottomCenter).background(color)
-        )
-    } else {
-        Box(Modifier.fillMaxHeight().width(band.dp).background(color))
-        Box(
-            Modifier.fillMaxHeight().width(band.dp)
-                .align(Alignment.CenterEnd).background(color)
-        )
+    var w = screenW
+    var h = screenW * ratio
+    if (h > screenH) {
+        h = screenH
+        w = screenH / ratio
     }
+    return w to h
 }

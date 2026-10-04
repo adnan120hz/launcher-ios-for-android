@@ -29,10 +29,9 @@ import kotlin.math.sin
 val IosYellow = Color(0xFFFFD60A)
 
 // ---------------------------------------------------------------------------
-// Liquid Glass material (iOS 26 ONLY). Translucent light-tinted gray with a
+// Liquid Glass material (iOS 26). Translucent light-tinted gray with a
 // vertical sheen: the live preview faintly shows through, a bright rim and a
-// soft top highlight sell real glass. iOS 18 UI must never use these tokens —
-// it renders flat opaque black instead (see Controls18).
+// soft top highlight sell real glass.
 // ---------------------------------------------------------------------------
 val GlassPanelBrush = Brush.verticalGradient(
     listOf(Color(0xDB636366), Color(0xC9404043))
@@ -248,18 +247,6 @@ fun FlipGlyph(color: Color, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun ChevronGlyph(color: Color, modifier: Modifier = Modifier, down: Boolean = false) {
-    Canvas(modifier) {
-        val w = size.width; val h = size.height
-        val sw = w * 0.10f
-        val midY = if (down) h * 0.62f else h * 0.38f
-        val topY = if (down) h * 0.34f else h * 0.66f
-        drawLine(color, Offset(w * 0.22f, topY), Offset(w * 0.50f, midY), sw)
-        drawLine(color, Offset(w * 0.50f, midY), Offset(w * 0.78f, topY), sw)
-    }
-}
-
-@Composable
 fun RunnerGlyph(color: Color, modifier: Modifier = Modifier, off: Boolean = false) {
     Canvas(modifier) {
         val w = size.width; val h = size.height
@@ -314,6 +301,43 @@ fun GridGlyph(color: Color, modifier: Modifier = Modifier) {
     }
 }
 
+/** Expand (⤢) glyph: two diagonal arrows pointing out to opposite corners. */
+@Composable
+fun ExpandGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width; val h = size.height
+        val sw = w * 0.075f
+        // arrow to top-right
+        drawLine(color, Offset(w * 0.38f, h * 0.62f), Offset(w * 0.80f, h * 0.20f), sw)
+        drawLine(color, Offset(w * 0.56f, h * 0.18f), Offset(w * 0.82f, h * 0.18f), sw)
+        drawLine(color, Offset(w * 0.82f, h * 0.18f), Offset(w * 0.82f, h * 0.44f), sw)
+        // arrow to bottom-left
+        drawLine(color, Offset(w * 0.62f, h * 0.38f), Offset(w * 0.20f, h * 0.80f), sw)
+        drawLine(color, Offset(w * 0.44f, h * 0.82f), Offset(w * 0.18f, h * 0.82f), sw)
+        drawLine(color, Offset(w * 0.18f, h * 0.82f), Offset(w * 0.18f, h * 0.56f), sw)
+    }
+}
+
+/** Settings gear glyph. */
+@Composable
+fun GearGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width; val h = size.height
+        val c = Offset(w / 2, h / 2)
+        val sw = w * 0.055f
+        drawCircle(color, w * 0.16f, c, style = Stroke(sw))
+        for (i in 0 until 8) {
+            val a = Math.toRadians(i * 45.0)
+            val x1 = c.x + w * 0.24f * cos(a).toFloat()
+            val y1 = c.y + w * 0.24f * sin(a).toFloat()
+            val x2 = c.x + w * 0.36f * cos(a).toFloat()
+            val y2 = c.y + w * 0.36f * sin(a).toFloat()
+            drawLine(color, Offset(x1, y1), Offset(x2, y2), sw)
+        }
+        drawCircle(color, w * 0.30f, c, style = Stroke(sw))
+    }
+}
+
 /** Camera body glyph (permission screen / placeholders). */
 @Composable
 fun CameraBodyGlyph(color: Color, modifier: Modifier = Modifier) {
@@ -336,5 +360,42 @@ fun CameraBodyGlyph(color: Color, modifier: Modifier = Modifier) {
         drawCircle(Color.Black, w * 0.16f, Offset(w / 2, h * 0.52f))
         drawCircle(color, w * 0.10f, Offset(w / 2, h * 0.52f))
         drawCircle(Color.Black, w * 0.055f, Offset(w / 2, h * 0.52f))
+    }
+}
+
+/** ✕ glyph for the iOS adjustment bars. */
+@Composable
+fun CloseGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width; val h = size.height
+        val sw = w * 0.09f
+        val p = w * 0.26f
+        drawLine(color, Offset(p, p), Offset(w - p, h - p), sw)
+        drawLine(color, Offset(w - p, p), Offset(p, h - p), sw)
+    }
+}
+
+/** Isometric cube — the centre glyph of the Portrait lighting wheel. */
+@Composable
+fun CubeGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width; val h = size.height
+        val sw = w * 0.055f
+        val top = Offset(w * 0.5f, h * 0.08f)
+        val upperLeft = Offset(w * 0.12f, h * 0.29f)
+        val upperRight = Offset(w * 0.88f, h * 0.29f)
+        val centre = Offset(w * 0.5f, h * 0.5f)
+        val lowerLeft = Offset(w * 0.12f, h * 0.71f)
+        val lowerRight = Offset(w * 0.88f, h * 0.71f)
+        val bottom = Offset(w * 0.5f, h * 0.92f)
+        drawLine(color, top, upperLeft, sw)
+        drawLine(color, top, upperRight, sw)
+        drawLine(color, upperLeft, centre, sw)
+        drawLine(color, upperRight, centre, sw)
+        drawLine(color, upperLeft, lowerLeft, sw)
+        drawLine(color, upperRight, lowerRight, sw)
+        drawLine(color, centre, bottom, sw)
+        drawLine(color, lowerLeft, bottom, sw)
+        drawLine(color, lowerRight, bottom, sw)
     }
 }
