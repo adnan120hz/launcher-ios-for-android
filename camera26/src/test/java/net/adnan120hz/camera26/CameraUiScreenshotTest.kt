@@ -245,6 +245,30 @@ class CameraUiScreenshotTest {
     }
 
     @Test
+    fun photoWide169() {
+        // fix11 item 6 render proof: PHOTO at 16:9 must keep the black
+        // top band (top pill floats on black, not on the preview) and the
+        // black control strip, exactly like 4:3 — the old code filled
+        // the whole region at this aspect and the bands vanished.
+        val state = baseState(paparazzi.context).apply {
+            aspect = PhotoAspect.RATIO_16_9
+        }
+        paparazzi.snapshot { Harness(state) }
+    }
+
+    @Test
+    fun zoomDial40x() {
+        // fix11 item 2 render proof: the dial at its 40x ceiling (the
+        // crop-region path) — labels still ascend, 40x under the needle.
+        val state = baseState(paparazzi.context).apply {
+            dialVisible = true
+            zoomRatio = 40f
+            zoomTarget = 40f
+        }
+        paparazzi.snapshot { Harness(state) }
+    }
+
+    @Test
     fun carouselMidDrag() {
         val state = baseState(paparazzi.context).apply {
             // Frozen mid-swipe frame: pill dragged 70px toward PORTRAIT.

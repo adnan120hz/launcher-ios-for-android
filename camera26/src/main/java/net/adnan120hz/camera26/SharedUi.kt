@@ -649,15 +649,15 @@ private fun ConfigPanel(state: CameraState) {
     ) { state.configSharpness = it }
     configSlider(
         "Saturasi", String.format(Locale.US, "%.2f", state.configSaturation),
-        state.configSaturation, 0.5f..1.6f
+        state.configSaturation, 0f..2f
     ) { state.configSaturation = it }
     configSlider(
         "Kontras", String.format(Locale.US, "%.2f", state.configContrast),
-        state.configContrast, 0.6f..1.5f
+        state.configContrast, 0.4f..1.8f
     ) { state.configContrast = it }
     configSlider(
         "Gamma", String.format(Locale.US, "%.2f", state.configGamma),
-        state.configGamma, 0.6f..1.6f
+        state.configGamma, 0.5f..2f
     ) { state.configGamma = it }
     configSlider(
         "Reduksi Noise", "${(state.configDenoise * 100).roundToInt()}",
@@ -667,7 +667,7 @@ private fun ConfigPanel(state: CameraState) {
     Spacer(Modifier.height(10.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-            "Config bawaan aplikasi ini — diterapkan nyata pada hasil foto.",
+            "Mode pro bawaan aplikasi ini — diterapkan nyata pada hasil foto di semua perangkat.",
             color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp,
             modifier = Modifier.weight(1f)
         )

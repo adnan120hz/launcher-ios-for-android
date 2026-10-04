@@ -56,4 +56,6 @@ dependencies {
     // Paparazzi: renders the real Compose UI to PNG screenshots on the JVM
     // (used to verify camera UI states without a physical device).
     testImplementation("app.cash.paparazzi:paparazzi:1.3.5")
+    // Plain JUnit for the pure pixel-core proofs (PhotoConfigProcessorTest).
+    testImplementation("junit:junit:4.13.2")
 }

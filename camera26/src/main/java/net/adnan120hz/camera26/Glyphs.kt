@@ -39,8 +39,13 @@ val IosYellow = Color(0xFFFFD60A)
 val GlassPanelBrush = Brush.verticalGradient(
     listOf(Color(0xCC333336), Color(0xBF26262A))
 )
+// fix11: the top/format pills used a markedly thinner wash (72%/65%
+// alpha) than every other glass surface, so over a bright preview they
+// read as "no background" while the bottom strip looked solid. The pill
+// brush now carries the same discipline as the panel/button surfaces
+// (~88%/~84%) — still glass, never see-through, in every mode.
 val GlassPillBrush = Brush.verticalGradient(
-    listOf(Color(0xB84A4A4F), Color(0xA6333338))
+    listOf(Color(0xE038383D), Color(0xD62B2B30))
 )
 val GlassRim = Color.White.copy(alpha = 0.20f)
 val GlassSheen = Color.White.copy(alpha = 0.10f)

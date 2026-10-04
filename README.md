@@ -10,6 +10,48 @@ Two apps live in this repo:
 - **`:camera26`** (`net.adnan120hz.camera26`) — an iOS 26 style camera app,
   shipped as its own APK and bundled with the launcher experience.
 
+## Changelog
+
+### Kamera iOS (camera26) 2.0.0 — 2026-10-04
+
+Latest fix round (fix11, from on-device testing of the previous build on an
+entry-level realme):
+
+- **ACTION / software-EIS no longer gets stuck on entry phones.** Pipeline
+  teardown is fully asynchronous (it never parks the UI thread on a latch),
+  encoder start runs off the main thread, the first-frame watchdog fails a
+  pipeline only on proven total death (zero frames after 3 s), and a failure
+  now hands over in order — the camera is released first, the CameraX
+  fallback binds onto the free camera, and the failure notice appears only
+  once the replacement image is on screen. A "Preparing EIS…" progress chip
+  covers the spin-up instead of a frozen dark viewfinder. Worst case to a
+  usable image stays far below the 10-second ceiling; the typical path is
+  sub-second.
+- **40x zoom dial lag fixed.** Crop-region (`SCALER_CROP_REGION`) applies are
+  quantised, identical rects are never re-sent, applies are capped at ~25/s
+  with a trailing flush that still lands the final settled rect exactly — the
+  full 1–40x range is unchanged, only the per-frame rebuild churn is gone.
+- **CONFIG is now a real pro mode.** Wider, clearly visible ranges
+  (saturation 0.0–2.0, contrast 0.4–1.8, gamma 0.5–2.0, full-strength unsharp
+  and denoise), presets (Default / Natural / Vivid / Tajam / Malam) that
+  differ measurably, applied for real to every captured photo on every
+  performance tier (neutral = byte-identical fast path). Unit tests measure
+  the effect on synthetic images (saturation, edge energy, shadow lift);
+  the blur reference no longer materialises a second full-resolution bitmap.
+- **Zoom gestures can't switch modes anymore.** While the zoom dial is
+  active, horizontal drags are zoom gestures only; the mode carousel moves
+  exclusively from its own pill.
+- **Top pill always has its glass background.** The shared pill brush now
+  carries the same opacity discipline as the bottom strip (~88%/84% alpha)
+  instead of washing out over bright previews.
+- **16:9 keeps its black bands.** Photo mode at 16:9 uses the same
+  letterbox path as 4:3/1:1, so the top black band (top pill) and the bottom
+  control strip stay put on tall screens; the ⤢ button still expands to
+  full-bleed.
+
+All builds are debug-signed CI artifacts; device verification of this round
+is ongoing.
+
 ## Planned feature set
 
 - Home screen that mirrors the iOS layout (~90% look and feel), with an

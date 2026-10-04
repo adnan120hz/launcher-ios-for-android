@@ -39,6 +39,7 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -54,6 +55,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -214,6 +216,13 @@ private fun CameraScreenContent() {
     var eisSurface by remember { mutableStateOf<Surface?>(null) }
     var eisSurfaceSize by remember { mutableStateOf(0 to 0) }
     var eisFacing by remember { mutableStateOf(state.facingFront) }
+    // fix11 ordered-handover bookkeeping: a pipeline failure must not
+    // surface (or rebind CameraX) until the camera is really released,
+    // and its failure notice is only shown once the replacement preview
+    // is bound and on screen. eisGen invalidates stale teardowns.
+    var eisFailureNoticePending by remember { mutableStateOf(false) }
+    var eisFailureNoticeText by remember { mutableStateOf("") }
+    var eisGen by remember { mutableStateOf(0) }
     val eisWanted = state.mode == CamMode.VIDEO && state.actionOn && state.eisEnabled &&
         state.caps.gyroAvailable && !state.eisFailed
     // A shutter tap that lands while the EIS pipeline is still spinning up
@@ -316,22 +325,80 @@ private fun CameraScreenContent() {
         else -> 854 to 480
     }
 
+    /**
+     * fix11 ordered teardown: release the GL pipeline WITHOUT ever
+     * blocking the main thread, then run [onDone] once the camera device
+     * is really free. The old effect called the latch-blocking stop()
+     * inline — up to 3 s of frozen UI on an entry phone — and latched
+     * eisFailed in the same breath, so the CameraX rebind raced a camera
+     * the GL pipeline still held, failed once, and was never retried:
+     * the viewfinder stayed dead until the failure toast. Now the latch
+     * flips only from [onDone], so the rebind it triggers binds a free
+     * camera and succeeds first try.
+     */
+    fun tearDownEisPipeline(onDone: (() -> Unit)? = null) {
+        val p = eisPipeline
+        eisPipeline = null
+        if (p == null) {
+            onDone?.invoke()
+            return
+        }
+        p.stopAsync(onDone)
+    }
+
+    /**
+     * fix11: single failure path for the software pipeline. The failure
+     * notice is parked ([eisFailureNoticePending]) and only toasted once
+     * the fallback CameraX preview is bound and visible — the user is
+     * never asked to read "it failed" while staring at a dead finder,
+     * and capture works again the moment the image is back.
+     */
+    fun failEisToFallback(noticeText: String) {
+        eisFailureNoticeText = noticeText
+        eisFailureNoticePending = true
+        tearDownEisPipeline {
+            state.eisActive = false
+            state.eisPreviewLive = false
+            state.eisFailed = true
+        }
+    }
+
     fun startEisRecording() {
         val pipeline = eisPipeline
         if (pipeline == null || !state.eisActive) {
-            state.toast = "EIS belum siap"
+            // Still spinning up: park the tap; the resolver effects start
+            // the recording on whichever path survives (EIS or fallback).
+            if (eisWanted) pendingEisRecord = true else state.toast = "EIS belum siap"
             return
         }
         val (w, h) = eisRecordSize()
-        if (pipeline.startRecording(state.micGranted, w, h)) {
-            state.isRecording = true
-            state.recordSeconds = 0
-        } else {
-            state.eisFailed = true
-            // The tap is not lost: it continues on the plain CameraX path
-            // as soon as that is bound again (see the resolver effects).
-            pendingFallbackRecord = true
-            state.toast = "EIS gagal mulai di perangkat ini — memakai rekam biasa"
+        val mic = state.micGranted
+        // fix11: encoder bring-up (MediaCodec configure + EGL surface)
+        // can take seconds on an entry HAL. Running it on the main
+        // thread froze the shutter — the "stuck" half of the ACTION
+        // report. It happens on a background thread now; only the state
+        // flips land back on main, and a failed start hands over through
+        // the same ordered fallback as a dead pipeline.
+        scope.launch(Dispatchers.Default) {
+            val ok = try {
+                pipeline.startRecording(mic, w, h)
+            } catch (e: Throwable) {
+                false
+            }
+            withContext(Dispatchers.Main) {
+                if (ok) {
+                    state.isRecording = true
+                    state.recordSeconds = 0
+                } else {
+                    // The tap is not lost: it continues on the plain
+                    // CameraX path as soon as that is bound again (see
+                    // the resolver effects).
+                    pendingFallbackRecord = true
+                    failEisToFallback(
+                        "EIS gagal mulai di perangkat ini — memakai rekam biasa"
+                    )
+                }
+            }
         }
     }
 
@@ -879,57 +946,69 @@ private fun CameraScreenContent() {
             val surface = eisSurface ?: return@LaunchedEffect
             val (sw, sh) = eisSurfaceSize
             if (sw <= 0 || sh <= 0) return@LaunchedEffect
-            if (state.eisActive && eisFacing == state.facingFront) {
+            if (state.eisActive && eisFacing == state.facingFront && eisPipeline != null) {
                 eisPipeline?.updatePreviewSize(sw, sh)
                 return@LaunchedEffect
             }
-            eisPipeline?.stop()
-            eisPipeline = null
-            if (controller.recordingActive) controller.stopRecording()
-            controller.unbindAll()
-            state.sessionBound = false
-            // The GL surface only replaces the CameraX preview once real
-            // frames have been presented (onFirstFrame below).
-            state.eisPreviewLive = false
-            val pipeline = EisPipeline(context)
-            eisPipeline = pipeline
-            eisFacing = state.facingFront
-            pipeline.listener = object : EisPipeline.Listener {
-                override fun onStarted() {
-                    state.eisActive = true
-                    state.bindError = null
-                    pipeline.setZoom(state.zoomRatio)
-                    pipeline.setTorch(state.videoTorch)
-                }
+            // fix11: the previous pipeline is torn down ASYNC and the new
+            // one is only created once the camera is really free (the
+            // generation token drops stale completions when the user
+            // flips or toggles mid-teardown). Nothing on this path waits
+            // on the main thread, and the "Menyiapkan EIS…" bridge (see
+            // the preview overlay) covers the spin-up instead of a frozen
+            // dark finder.
+            eisGen += 1
+            val gen = eisGen
+            tearDownEisPipeline {
+                if (gen != eisGen) return@tearDownEisPipeline
+                if (controller.recordingActive) controller.stopRecording()
+                controller.unbindAll()
+                state.sessionBound = false
+                // The GL surface only replaces the CameraX preview once real
+                // frames have been presented (onFirstFrame below).
+                state.eisPreviewLive = false
+                val pipeline = EisPipeline(context)
+                eisPipeline = pipeline
+                eisFacing = state.facingFront
+                pipeline.listener = object : EisPipeline.Listener {
+                    override fun onStarted() {
+                        state.eisActive = true
+                        state.bindError = null
+                        pipeline.setZoom(state.zoomRatio)
+                        pipeline.setTorch(state.videoTorch)
+                    }
 
-                override fun onFirstFrame() {
-                    state.eisPreviewLive = true
-                }
+                    override fun onFirstFrame() {
+                        state.eisPreviewLive = true
+                    }
 
-                override fun onFailed(reason: String) {
-                    state.eisActive = false
-                    state.eisPreviewLive = false
-                    state.eisFailed = true
-                    state.toast =
-                        "Stabilisasi software tidak berjalan di perangkat ini — rekam biasa"
-                }
+                    override fun onFailed(reason: String) {
+                        // Ordered handover (fix11): release first, latch
+                        // eisFailed only once the camera is free, and let
+                        // the notice wait for the fallback image.
+                        failEisToFallback(
+                            "Stabilisasi software tidak berjalan di perangkat ini — rekam biasa"
+                        )
+                    }
 
-                override fun onRecordingSaved(uri: Uri) {
-                    state.isRecording = false
-                    refreshThumb()
-                }
+                    override fun onRecordingSaved(uri: Uri) {
+                        state.isRecording = false
+                        refreshThumb()
+                    }
 
-                override fun onRecordingFailed() {
-                    state.isRecording = false
-                    state.toast = "Rekaman EIS gagal disimpan"
+                    override fun onRecordingFailed() {
+                        state.isRecording = false
+                        state.toast = "Rekaman EIS gagal disimpan"
+                    }
                 }
+                pipeline.start(surface, sw, sh, state.facingFront)
             }
-            pipeline.start(surface, sw, sh, state.facingFront)
         } else {
-            if (eisPipeline != null) {
-                eisPipeline?.stop()
-                eisPipeline = null
-            }
+            // Invalidate any in-flight start teardown (fix11): without
+            // this, its completion could still create a pipeline after
+            // the user already turned ACTION off.
+            eisGen += 1
+            tearDownEisPipeline()
             state.eisActive = false
             state.eisPreviewLive = false
             // A parked shutter tap belongs to the run that just ended —
@@ -971,9 +1050,21 @@ private fun CameraScreenContent() {
         }
     }
 
+    // fix11: the failure notice only appears once the replacement
+    // preview is actually bound and on screen — never while the user is
+    // still staring at the dead/frozen one.
+    LaunchedEffect(state.sessionBound, state.eisPreviewLive, eisFailureNoticePending) {
+        if (eisFailureNoticePending && (state.sessionBound || state.eisPreviewLive)) {
+            state.toast = eisFailureNoticeText
+            eisFailureNoticePending = false
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
-            eisPipeline?.stop()
+            // Async teardown (fix11): dispose must never park the main
+            // thread on the pipeline's stop latch.
+            tearDownEisPipeline()
             pano.stop()
         }
     }
@@ -1278,6 +1369,41 @@ private fun CameraScreenContent() {
                     update = { pv -> if (previewView !== pv) previewView = pv }
                 )
             }
+            // fix11 preparing bridge: while the software pipeline spins
+            // up, an honest progress chip rides over the still-live
+            // CameraX preview instead of a silently frozen dark finder.
+            // It vanishes the moment real EIS frames are presented
+            // (eisPreviewLive) — long before the 10 s ceiling — and if
+            // the pipeline dies, the ordered fallback clears it by
+            // latching eisFailed.
+            if ((eisWanted || state.eisActive) && !state.eisPreviewLive &&
+                !state.eisFailed && !state.isRecording
+            ) {
+                Box(
+                    Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        Modifier
+                            .background(
+                                Color(0xB3000000),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator(
+                            color = IosYellow,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "Menyiapkan EIS…", color = Color.White,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
         }
         }
 
@@ -1330,7 +1456,17 @@ private fun CameraScreenContent() {
                         },
                         onHorizontalDrag = { _, drag -> total += drag },
                         onDragEnd = {
-                            if (!fromStrip && abs(total) > 70f && state.sheet == SheetKind.NONE) {
+                            // fix11: while the zoom dial owns the screen,
+                            // a horizontal drag is a zoom gesture, never a
+                            // mode swipe — the dial lives above the strip,
+                            // so strip-started drags were the only ones
+                            // guarded before and dial drags kept leaking
+                            // into the carousel (the "tiba-tiba pindah ke
+                            // PORTRAIT" report). The carousel only moves
+                            // from its own pill.
+                            if (!fromStrip && !state.dialVisible &&
+                                abs(total) > 70f && state.sheet == SheetKind.NONE
+                            ) {
                                 swipeMode(if (total < 0) 1 else -1)
                             }
                         },
@@ -1512,8 +1648,15 @@ internal fun previewAreaDp(
     val ratio = when (aspect) {
         PhotoAspect.RATIO_4_3 -> 4f / 3f
         PhotoAspect.SQUARE -> 1f
-        PhotoAspect.RATIO_16_9 -> return screenW to screenH
+        PhotoAspect.RATIO_16_9 -> 16f / 9f
     }
+    // fix11: 16:9 used to short-circuit to the FULL region, so on tall
+    // phones the preview swallowed the top band entirely and the top
+    // pill floated over live image ("background hitam hilang di 16:9").
+    // It now takes the same letterbox path as 4:3/1:1: width-driven
+    // first, and if that would eat the guaranteed top black band, fit by
+    // height minus the band. The ⤢ button (filled) still expands to the
+    // whole region, and VIDEO is unaffected (never letterboxed).
     var w = screenW
     var h = screenW * ratio
     if (h > screenH - TOP_BAND_MIN_DP) {

@@ -206,15 +206,17 @@ class EisPipeline(private val context: Context) {
                 startOnThread(front)
                 running = true
                 mainHandler.post { listener?.onStarted() }
-                // Watchdog (safety net, de-fanged by user order): the old
-                // 1500 ms zero-preview-frame rule could execute a HEALTHY
-                // pipeline on a slow entry HAL whose Camera2 session simply
-                // needs longer to produce its first frame — ACTION then
-                // looked stuck and fell back with no stabilisation at all.
-                // Now the pipeline is only failed on PROVEN total death:
-                // a generous 6 s grace and not one GL frame drawn anywhere
-                // (preview or encoder). A pipeline drawing anything is
-                // alive and is never touched.
+                // Watchdog (safety net): fail the pipeline only on PROVEN
+                // total death (not one GL frame drawn anywhere after the
+                // grace below). A pipeline drawing anything is alive and
+                // is never touched. fix11: the grace is 3 s of zero frames
+                // — the old 1.5 s rule executed healthy pipelines on slow
+                // entry HALs, but 6 s left the user staring at a dark,
+                // frozen finder; 3 s of total silence is dead on every
+                // HAL, and the caller now hands over to the CameraX
+                // fallback (ordered: camera released first, failure
+                // notice only after the replacement preview is bound), so
+                // an image is back well under the user's 10 s ceiling.
                 handler?.postDelayed({
                     if (running && framesDrawn.get() == 0L) {
                         mainHandler.post {
@@ -259,6 +261,48 @@ class EisPipeline(private val context: Context) {
         } catch (e: Throwable) { /* ignore */ }
         thread = null
         handler = null
+    }
+
+    /**
+     * Asynchronous teardown: the whole cleanup (recording stop, GL and
+     * camera release) runs on the pipeline thread and [onDone] is invoked
+     * on the main thread only AFTER the camera device has actually been
+     * released. fix11: [stop] parks its caller on a latch for up to 3 s —
+     * calling it from the main thread (the old lifecycle effect did)
+     * froze the UI exactly like the "ACTION bikin lama stuck" report.
+     * Teardown now never blocks the caller, and because [onDone] fires
+     * post-release, a fallback rebind started from it always binds a free
+     * camera.
+     */
+    fun stopAsync(onDone: (() -> Unit)? = null) {
+        val h = handler
+        if (h == null) {
+            try {
+                gyro.stop()
+            } catch (e: Throwable) { /* ignore */ }
+            onDone?.invoke()
+            return
+        }
+        h.post {
+            try {
+                if (recording) {
+                    try {
+                        stopRecordingOnThread()
+                    } catch (e: Throwable) { /* best effort */ }
+                    recording = false
+                }
+                cleanupOnThread()
+            } catch (e: Throwable) { /* best effort */ }
+            running = false
+            try {
+                thread?.quitSafely()
+            } catch (e: Throwable) { /* ignore */ }
+            thread = null
+            handler = null
+            if (onDone != null) {
+                mainHandler.post { onDone() }
+            }
+        }
     }
 
     /** Live preview surface size changed (rotation); viewport adapts per frame. */
@@ -367,7 +411,7 @@ class EisPipeline(private val context: Context) {
                 openLatch.countDown()
             }
         }, handler)
-        if (!openLatch.await(5, TimeUnit.SECONDS)) {
+        if (!openLatch.await(3, TimeUnit.SECONDS)) {
             throw IllegalStateException("Timeout membuka kamera")
         }
         openError?.let { throw it }
@@ -392,7 +436,7 @@ class EisPipeline(private val context: Context) {
             },
             handler
         )
-        if (!sessionLatch.await(5, TimeUnit.SECONDS)) {
+        if (!sessionLatch.await(3, TimeUnit.SECONDS)) {
             throw IllegalStateException("Timeout sesi kamera")
         }
         sessionError?.let { throw it }
@@ -1235,9 +1279,13 @@ class EisPipeline(private val context: Context) {
 
     companion object {
         /** First-frame watchdog grace: fail only on proven total death
-         *  (zero GL frames drawn anywhere after 6 s). Never kills a
-         *  pipeline that is merely slow to start. */
-        private const val FRAME_WATCHDOG_MS = 6000L
+         *  (zero GL frames drawn anywhere after 3 s). Never kills a
+         *  pipeline that is merely slow to start, and keeps the whole
+         *  startup bridge (worst case: 3 s open + 3 s session + 3 s
+         *  watchdog) under the user's 10 s "time to an image" ceiling —
+         *  while the ordered CameraX fallback restores a usable image
+         *  far sooner than that in practice. */
+        private const val FRAME_WATCHDOG_MS = 3000L
 
         private fun transpose3(m: FloatArray): FloatArray = floatArrayOf(
             m[0], m[3], m[6],

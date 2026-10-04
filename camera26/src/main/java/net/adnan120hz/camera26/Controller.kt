@@ -96,6 +96,24 @@ class CameraController(private val context: Context) {
      */
     @Volatile private var zoomCropRatio: Float? = null
 
+    // fix11 zoom-lag throttle state: crop applies are capped at ~25/s
+    // with a trailing flush, and a rect identical to the last applied one
+    // is never re-sent to the HAL.
+    @Volatile private var lastAppliedCropRect: android.graphics.Rect? = null
+    @Volatile private var pendingCropRatio: Float? = null
+    @Volatile private var lastCropApplyMs = 0L
+    private val cropFlushScheduled =
+        java.util.concurrent.atomic.AtomicBoolean(false)
+    private val cropFlushExecutor =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "camera26-zoomcrop").apply { isDaemon = true }
+        }
+
+    private companion object {
+        /** Minimum gap between crop-region applies while zooming (≈25/s). */
+        const val CROP_APPLY_MIN_INTERVAL_MS = 40L
+    }
+
     // Sensor active-array cache for the crop-zoom path: a fixed fact per
     // bound camera, fetched once instead of on every zoom frame.
     private var aaCacheFor: Camera? = null
@@ -359,8 +377,72 @@ class CameraController(private val context: Context) {
         ) {
             return // ignore sub-2-percent churn from the animator
         }
+        if (v == null) {
+            // Clearing is rare and must land immediately: reset throttle.
+            lastAppliedCropRect = null
+            pendingCropRatio = null
+            lastCropApplyMs = 0L
+        }
         zoomCropRatio = v
+        applyCropOptions()
+    }
+
+    /** Centred crop rect of the active array for total ratio [zr]. */
+    private fun cropRectFor(aa: android.graphics.Rect, zr: Float): android.graphics.Rect {
+        val cw = (aa.width() / zr).roundToInt().coerceAtLeast(1)
+        val ch = (aa.height() / zr).roundToInt().coerceAtLeast(1)
+        val left = aa.left + (aa.width() - cw) / 2
+        val top = aa.top + (aa.height() - ch) / 2
+        return android.graphics.Rect(left, top, left + cw, top + ch)
+    }
+
+    /**
+     * fix11: even past the 2% gate, a fast 40x sweep used to rebuild
+     * CaptureRequestOptions on every animator step — each rebuild is a
+     * Camera2 interop round-trip landing in the UI-critical zoom path
+     * ("slider zoom 40x lag parah"). Now an identical rect is never
+     * re-sent, applies are capped at ~25/s, and a trailing flush applies
+     * the settled final rect exactly, so the reachable range is
+     * unchanged — only the churn is gone.
+     */
+    private fun applyCropOptions() {
+        val cam = camera ?: return
+        val zr = zoomCropRatio ?: run {
+            applyCamera2Options() // clear path: immediate, unthrottled
+            return
+        }
+        val aa = activeArrayCached(cam)
+        val rect = if (aa != null && aa.width() > 0 && aa.height() > 0) {
+            cropRectFor(aa, zr)
+        } else {
+            null
+        }
+        if (rect != null && rect == lastAppliedCropRect) return // identical: skip
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastCropApplyMs < CROP_APPLY_MIN_INTERVAL_MS) {
+            pendingCropRatio = zr
+            scheduleCropFlush()
+            return
+        }
         applyCamera2Options()
+        lastAppliedCropRect = rect
+        lastCropApplyMs = now
+        pendingCropRatio = null
+    }
+
+    private fun scheduleCropFlush() {
+        if (!cropFlushScheduled.compareAndSet(false, true)) return
+        try {
+            cropFlushExecutor.schedule({
+                cropFlushScheduled.set(false)
+                val pending = pendingCropRatio
+                if (pending != null && pending == zoomCropRatio) {
+                    mainExecutor.execute { applyCropOptions() }
+                }
+            }, CROP_APPLY_MIN_INTERVAL_MS, TimeUnit.MILLISECONDS)
+        } catch (e: Throwable) {
+            cropFlushScheduled.set(false)
+        }
     }
 
     fun setTargetFps(fps: Int) {
@@ -399,13 +481,9 @@ class CameraController(private val context: Context) {
                 // the "zoom lambat/lag" report).
                 val aa = activeArrayCached(cam)
                 if (aa != null && aa.width() > 0 && aa.height() > 0) {
-                    val cw = (aa.width() / zr).roundToInt().coerceAtLeast(1)
-                    val ch = (aa.height() / zr).roundToInt().coerceAtLeast(1)
-                    val left = aa.left + (aa.width() - cw) / 2
-                    val top = aa.top + (aa.height() - ch) / 2
                     builder.setCaptureRequestOption(
                         CaptureRequest.SCALER_CROP_REGION,
-                        android.graphics.Rect(left, top, left + cw, top + ch)
+                        cropRectFor(aa, zr)
                     )
                     builder.setCaptureRequestOption(
                         CaptureRequest.CONTROL_ZOOM_RATIO, 1.0f
