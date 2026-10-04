@@ -26,11 +26,6 @@
 	<string>Kamera iOS memerlukan akses mikrofon agar suara dapat ikut terekam saat Anda merekam video.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Kamera iOS memerlukan izin untuk menyimpan hasil foto dan video ke galeri Foto Anda.</string>
-	<key>UIApplicationSceneManifest</key>
-	<dict>
-		<key>UIApplicationSupportsMultipleScenes</key>
-		<false/>
-	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

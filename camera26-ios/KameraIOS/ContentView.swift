@@ -12,9 +12,16 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if vm.permissionDenied {
+            switch vm.launchState {
+            case .checkingPermission, .starting:
+                launchProgressView
+            case .needsPermission:
+                permissionRequestView
+            case .denied:
                 permissionDeniedView
-            } else {
+            case .failed(let reason):
+                launchFailedView(reason)
+            case .ready:
                 cameraStack
             }
 
@@ -255,6 +262,78 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .frame(width: 52)
+    }
+
+    // MARK: - Launch states
+
+    private var launchProgressView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "camera.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(Color.white.opacity(0.85))
+            Text("Kamera iOS")
+                .font(.system(size: 19, weight: .bold)).foregroundStyle(.white)
+            ProgressView().tint(.white)
+            Text("Menyiapkan kamera…")
+                .font(.system(size: 13))
+                .foregroundStyle(Color.white.opacity(0.6))
+        }
+    }
+
+    private var permissionRequestView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "camera")
+                .font(.system(size: 44))
+                .foregroundStyle(Color.white.opacity(0.6))
+            Text("Akses kamera diperlukan")
+                .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
+            Text("Kamera iOS memakai kamera hanya untuk mengambil foto dan merekam video dari dalam app. Tidak ada yang diunggah.")
+                .font(.system(size: 13))
+                .foregroundStyle(Color.white.opacity(0.6))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Button("Izinkan Akses Kamera") {
+                vm.requestCameraPermission()
+            }
+            .font(.system(size: 15, weight: .bold))
+            .foregroundStyle(.black)
+            .padding(.horizontal, 22)
+            .frame(height: 46)
+            .background(Capsule().fill(Color(red: 1, green: 0.8, blue: 0)))
+            Text("Kamu bisa mengubah izin kapan saja di Pengaturan iOS.")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.white.opacity(0.4))
+        }
+    }
+
+    private func launchFailedView(_ reason: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 44))
+                .foregroundStyle(Color(red: 1, green: 0.8, blue: 0))
+            Text("Kamera gagal dimulai")
+                .font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
+            Text(reason)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.white.opacity(0.65))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Button("Coba Lagi") {
+                vm.retryStart()
+            }
+            .font(.system(size: 15, weight: .bold))
+            .foregroundStyle(.black)
+            .padding(.horizontal, 22)
+            .frame(height: 46)
+            .background(Capsule().fill(Color(red: 1, green: 0.8, blue: 0)))
+            Button("Buka Pengaturan") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            .font(.system(size: 14, weight: .bold))
+            .foregroundStyle(Color(red: 1, green: 0.8, blue: 0))
+        }
     }
 
     private var permissionDeniedView: some View {

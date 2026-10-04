@@ -11,22 +11,36 @@ struct CameraPreviewView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: PreviewUIView, context: Context) {}
+    func updateUIView(_ uiView: PreviewUIView, context: Context) {
+        // SwiftUI may recycle the host view; re-attach if the layer ever
+        // ended up parented elsewhere.
+        if uiView.attachedLayer !== engine.previewLayer || engine.previewLayer.superlayer !== uiView.layer {
+            uiView.attach(engine.previewLayer)
+        }
+    }
 }
 
 final class PreviewUIView: UIView {
-    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private(set) var attachedLayer: AVCaptureVideoPreviewLayer?
 
     func attach(_ layer: AVCaptureVideoPreviewLayer) {
-        previewLayer?.removeFromSuperlayer()
-        previewLayer = layer
+        // Attaching an empty (not-yet-running) preview layer is safe; the
+        // session fills it when started. Never steal the layer away from
+        // this same view twice in a row.
+        if attachedLayer === layer, layer.superlayer === self.layer {
+            setNeedsLayout()
+            return
+        }
+        attachedLayer?.removeFromSuperlayer()
+        attachedLayer = layer
         self.layer.addSublayer(layer)
+        if !bounds.isEmpty { layer.frame = bounds }
         setNeedsLayout()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        previewLayer?.frame = bounds
+        attachedLayer?.frame = bounds
     }
 }
 

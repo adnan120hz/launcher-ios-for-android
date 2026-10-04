@@ -47,11 +47,30 @@ final class CameraEngine: NSObject {
     private var photoCompletion: ((AVCapturePhoto?, Error?) -> Void)?
     private var recordCompletion: ((URL?, Error?) -> Void)?
     private var movieOutputAttached = false
+    private var notificationTokens: [NSObjectProtocol] = []
+
+    /// Called (on the main queue) when the capture session itself fails
+    /// after a successful start, so the UI can say why instead of dying
+    /// or sitting on a black preview.
+    var onRuntimeError: ((String) -> Void)?
 
     override init() {
         super.init()
         previewLayer.session = session
         previewLayer.videoGravity = .resizeAspectFill
+        let center = NotificationCenter.default
+        notificationTokens.append(center.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: .main) { [weak self] note in
+            let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+            let reason = error?.localizedDescription ?? "Sesi kamera berhenti karena kesalahan sistem."
+            self?.onRuntimeError?(reason)
+        })
+        notificationTokens.append(center.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: .main) { [weak self] _ in
+            self?.onRuntimeError?("Sesi kamera terputus (panggilan masuk atau app lain memakai kamera).")
+        })
+    }
+
+    deinit {
+        notificationTokens.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
     // MARK: - Lifecycle
@@ -110,7 +129,7 @@ final class CameraEngine: NSObject {
 
     func start() {
         sessionQueue.async { [weak self] in
-            guard let self, !self.session.isRunning else { return }
+            guard let self, !self.session.isRunning, !self.session.inputs.isEmpty else { return }
             self.session.startRunning()
         }
     }

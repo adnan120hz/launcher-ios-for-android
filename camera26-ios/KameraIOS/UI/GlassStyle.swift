@@ -27,7 +27,8 @@ struct GlassCapsuleBackground: View {
 
     var body: some View {
         if #available(iOS 26.0, *) {
-            Color.clear
+            Capsule()
+                .fill(.clear)
                 .glassEffect(.regular.tint(tint), in: Capsule())
         } else {
             Capsule()
@@ -52,7 +53,8 @@ struct GlassPanelBackground: View {
 
     var body: some View {
         if #available(iOS 26.0, *) {
-            Color.clear
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.clear)
                 .glassEffect(.regular.tint(tint), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         } else {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)

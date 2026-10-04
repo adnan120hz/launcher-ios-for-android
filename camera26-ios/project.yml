@@ -28,8 +28,6 @@ targets:
         NSCameraUsageDescription: "Kamera iOS memerlukan akses kamera agar Anda dapat mengambil foto dan merekam video secara langsung dari aplikasi."
         NSMicrophoneUsageDescription: "Kamera iOS memerlukan akses mikrofon agar suara dapat ikut terekam saat Anda merekam video."
         NSPhotoLibraryAddUsageDescription: "Kamera iOS memerlukan izin untuk menyimpan hasil foto dan video ke galeri Foto Anda."
-        UIApplicationSceneManifest:
-          UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:

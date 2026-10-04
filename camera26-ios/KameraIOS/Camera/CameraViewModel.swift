@@ -14,8 +14,21 @@ final class CameraViewModel: ObservableObject {
     private let motion = CMMotionManager()
 
     // Lifecycle / permissions
-    @Published var isReady = false
-    @Published var permissionDenied = false
+    /// Explicit, platform-native launch sequence: the capture engine is
+    /// only ever configured after camera authorization is known-granted,
+    /// asking is an explicit user action, and every failure lands on a
+    /// visible screen with a reason — never a black, dead preview.
+    enum LaunchState: Equatable {
+        case checkingPermission
+        case needsPermission   // notDetermined: wait for the user to tap
+        case denied
+        case starting
+        case ready
+        case failed(String)
+    }
+    @Published var launchState: LaunchState = .checkingPermission
+    var isReady: Bool { launchState == .ready }
+    private var didBootstrap = false
 
     // Modes & sheets
     @Published var mode: CameraMode = .photo
@@ -103,29 +116,75 @@ final class CameraViewModel: ObservableObject {
     // MARK: - Bootstrap
 
     func bootstrap() {
+        guard !didBootstrap else { return }
+        didBootstrap = true
         loadPersisted()
         if !onboarded { onboardingVisible = true }
-        Permissions.requestCamera { [weak self] granted in
+        engine.onRuntimeError = { [weak self] reason in
             guard let self else { return }
-            if !granted {
-                self.permissionDenied = true
+            if self.launchState == .ready {
+                self.showToast(reason)
+            } else {
+                self.launchState = .failed(reason)
+            }
+        }
+        evaluateCameraAuthorization(requestIfNeeded: false)
+    }
+
+    /// Reads the current authorization first; the system prompt is only
+    /// triggered from the permission screen's button (`requestIfNeeded`).
+    private func evaluateCameraAuthorization(requestIfNeeded: Bool) {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            launchState = .starting
+            startEngine()
+        case .notDetermined:
+            if requestIfNeeded {
+                Permissions.requestCamera { [weak self] granted in
+                    guard let self else { return }
+                    if granted {
+                        self.launchState = .starting
+                        self.startEngine()
+                    } else {
+                        self.launchState = .denied
+                    }
+                }
+            } else {
+                launchState = .needsPermission
+            }
+        default:
+            launchState = .denied
+        }
+    }
+
+    /// The permission screen's button — asking is an explicit user action.
+    func requestCameraPermission() {
+        evaluateCameraAuthorization(requestIfNeeded: true)
+    }
+
+    /// Retry from the failed-state screen.
+    func retryStart() {
+        launchState = .starting
+        startEngine()
+    }
+
+    private func startEngine() {
+        engine.configure(position: facingFront ? .front : .back) { [weak self] ok in
+            guard let self else { return }
+            guard ok else {
+                self.launchState = .failed("Kamera tidak ditemukan atau gagal dimulai di perangkat ini.")
                 return
             }
-            Permissions.requestMicrophone { _ in }
-            self.engine.configure(position: .back) { ok in
-                self.isReady = ok
-                if ok {
-                    self.engine.start()
-                    self.engine.setVideoOutputAttached(false)
-                    self.selectedFormat = self.engine.capabilities.videoFormats.first { $0.label == "HD" }
-                        ?? self.engine.capabilities.videoFormats.first
-                    if let fmt = self.selectedFormat, !fmt.fpsOptions.contains(self.fps) {
-                        self.fps = fmt.fpsOptions.first ?? 30
-                    }
-                    self.refreshStabLabel()
-                    self.checkForUpdate()
-                }
+            self.engine.start()
+            self.engine.setVideoOutputAttached(false)
+            self.selectedFormat = self.engine.capabilities.videoFormats.first { $0.label == "HD" }
+                ?? self.engine.capabilities.videoFormats.first
+            if let fmt = self.selectedFormat, !fmt.fpsOptions.contains(self.fps) {
+                self.fps = fmt.fpsOptions.first ?? 30
             }
+            self.refreshStabLabel()
+            self.launchState = .ready
+            self.checkForUpdate()
         }
     }
 
@@ -135,7 +194,7 @@ final class CameraViewModel: ObservableObject {
     }
 
     func resume() {
-        if isReady { engine.start() }
+        if launchState == .ready { engine.start() }
     }
 
     /// Carousel settle — one gesture, at most one hop, always landing on
