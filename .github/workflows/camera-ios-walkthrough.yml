@@ -29,8 +29,8 @@ jobs:
           if [ -n "$NEWEST" ]; then sudo xcode-select -s "$NEWEST"; fi
           xcodebuild -version
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install XcodeGen and ffmpeg (for the video trim)
+        run: brew install xcodegen ffmpeg
 
       - name: Generate Xcode project
         working-directory: camera26-ios
@@ -135,6 +135,14 @@ jobs:
           ls -la walkthrough.mp4
           ffprobe -v error -show_entries format=duration -show_entries stream=width,height,avg_frame_rate,codec_name walkthrough.mp4 || true
 
+      - name: Dump simulator app log (diagnostics)
+        if: always()
+        working-directory: camera26-ios
+        run: |
+          xcrun simctl spawn "${SIM_UDID}" log show --style compact --last 10m \
+            --predicate 'process == "KameraIOS"' > sim-app-log.txt 2>&1 || true
+          wc -l sim-app-log.txt || true
+
       - name: Upload walkthrough video
         if: always()
         uses: actions/upload-artifact@v4
@@ -149,4 +157,5 @@ jobs:
           name: Kamera-iOS-Walkthrough-Logs
           path: |
             camera26-ios/xcodebuild-test.log
+            camera26-ios/sim-app-log.txt
             camera26-ios/build/Walkthrough.xcresult

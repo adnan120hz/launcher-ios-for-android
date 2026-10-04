@@ -59,10 +59,17 @@ final class CameraEngine: NSObject {
         previewLayer.videoGravity = .resizeAspectFill
         let center = NotificationCenter.default
         notificationTokens.append(center.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: .main) { [weak self] note in
+            guard let self else { return }
+            #if targetEnvironment(simulator)
+            // One bare-session retry on the Simulator (plain preset,
+            // re-seated input) before surfacing the failure — the
+            // virtual camera there rejects some full configurations.
+            if self.retrySimulatorStartOnce() { return }
+            #endif
             let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
             let reason = error.map { "\($0.localizedDescription) (\($0.domain) \($0.code))" }
                 ?? "Sesi kamera berhenti karena kesalahan sistem."
-            self?.onRuntimeError?(reason)
+            self.onRuntimeError?(reason)
         })
         notificationTokens.append(center.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: .main) { [weak self] _ in
             self?.onRuntimeError?("Sesi kamera terputus (panggilan masuk atau app lain memakai kamera).")
@@ -124,6 +131,9 @@ final class CameraEngine: NSObject {
         }
         #endif
         refreshCapabilities(for: dev)
+        NSLog("KameraIOS configure: device=%@ type=%@ formats=%d preset=%@",
+              dev.localizedName, dev.deviceType.rawValue, dev.formats.count,
+              session.sessionPreset.rawValue)
         return true
     }
 
@@ -133,11 +143,21 @@ final class CameraEngine: NSObject {
             .builtInWideAngleCamera, .builtInUltraWideCamera, .builtInTrueDepthCamera,
         ]
         let discovery = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: position)
+        #if targetEnvironment(simulator)
+        // The Simulator's virtual (dual/triple) devices enumerate and
+        // accept a session input, but their capture pipeline cannot
+        // actually start (AVFoundationErrorDomain -11800 at
+        // startRunning on the CI simulators). The plain wide-angle
+        // device is the one backed by the simulated camera feed.
+        return discovery.devices.first(where: { $0.deviceType == .builtInWideAngleCamera })
+            ?? discovery.devices.first
+        #else
         // Prefer a virtual device (gives real 0.5x / telephoto switching).
         if let virtual = discovery.devices.first(where: { $0.deviceType == .builtInTripleCamera || $0.deviceType == .builtInDualWideCamera || $0.deviceType == .builtInDualCamera }) {
             return virtual
         }
         return discovery.devices.first
+        #endif
     }
 
     func start() {
@@ -146,6 +166,39 @@ final class CameraEngine: NSObject {
             self.session.startRunning()
         }
     }
+
+    #if targetEnvironment(simulator)
+    private var didRetrySimulatorStart = false
+
+    /// Simulator-only recovery: if the first startRunning dies with a
+    /// runtime error, retry once with the session in its most basic
+    /// shape (named .photo preset instead of .inputPriority, input
+    /// removed and re-added). Returns true when the retry was launched
+    /// and the error should be swallowed for now; a second failure is
+    /// reported to the UI as usual.
+    private func retrySimulatorStartOnce() -> Bool {
+        guard !didRetrySimulatorStart else { return false }
+        didRetrySimulatorStart = true
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.session.beginConfiguration()
+            if self.session.canSetSessionPreset(.photo) {
+                self.session.sessionPreset = .photo
+            }
+            if let current = self.input {
+                self.session.removeInput(current)
+                if self.session.canAddInput(current) {
+                    self.session.addInput(current)
+                }
+            }
+            self.session.commitConfiguration()
+            if !self.session.isRunning, !self.session.inputs.isEmpty {
+                self.session.startRunning()
+            }
+        }
+        return true
+    }
+    #endif
 
     func stop() {
         sessionQueue.async { [weak self] in
