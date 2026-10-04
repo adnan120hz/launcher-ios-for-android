@@ -96,6 +96,27 @@ class CameraController(private val context: Context) {
      */
     @Volatile private var zoomCropRatio: Float? = null
 
+    // Sensor active-array cache for the crop-zoom path: a fixed fact per
+    // bound camera, fetched once instead of on every zoom frame.
+    private var aaCacheFor: Camera? = null
+    private var aaCache: android.graphics.Rect? = null
+
+    private fun activeArrayCached(cam: Camera): android.graphics.Rect? {
+        if (aaCacheFor === cam) return aaCache
+        val aa = try {
+            Camera2CameraInfo.from(cam.cameraInfo)
+                .getCameraCharacteristic(
+                    android.hardware.camera2.CameraCharacteristics
+                        .SENSOR_INFO_ACTIVE_ARRAY_SIZE
+                )
+        } catch (e: Throwable) {
+            null
+        }
+        aaCacheFor = cam
+        aaCache = aa
+        return aa
+    }
+
     val recordingActive: Boolean get() = recording != null
     val videoReady: Boolean get() = videoCapture != null
 
@@ -327,10 +348,16 @@ class CameraController(private val context: Context) {
         val v = totalRatio?.takeIf { it > 1f }
         val prev = zoomCropRatio
         if (v == null && prev == null) return
+        // ROMBAK zoom-lag fix: was 0.4% — during a dial/pinch sweep the
+        // animator emits a value every frame, so HAL capture-request
+        // options were rebuilt dozens of times per sweep on top of a
+        // per-call CameraCharacteristics fetch (below). Quantise to 2%
+        // steps: the crop still tracks the finger, request rebuilds drop
+        // ~5x.
         if (v != null && prev != null &&
-            kotlin.math.abs(v - prev) / prev < 0.004f
+            kotlin.math.abs(v - prev) / prev < 0.02f
         ) {
-            return // ignore sub-half-percent churn from the animator
+            return // ignore sub-2-percent churn from the animator
         }
         zoomCropRatio = v
         applyCamera2Options()
@@ -365,15 +392,12 @@ class CameraController(private val context: Context) {
                 )
             }
             zoomCropRatio?.let { zr ->
-                val aa = try {
-                    Camera2CameraInfo.from(cam.cameraInfo)
-                        .getCameraCharacteristic(
-                            android.hardware.camera2.CameraCharacteristics
-                                .SENSOR_INFO_ACTIVE_ARRAY_SIZE
-                        )
-                } catch (e: Throwable) {
-                    null
-                }
+                // Active-array size is a fixed per-camera fact: read it
+                // ONCE per bound camera and cache it. The old code fetched
+                // the CameraCharacteristics on every accepted zoom frame —
+                // interop conversion churn right in the zoom path (part of
+                // the "zoom lambat/lag" report).
+                val aa = activeArrayCached(cam)
                 if (aa != null && aa.width() > 0 && aa.height() > 0) {
                     val cw = (aa.width() / zr).roundToInt().coerceAtLeast(1)
                     val ch = (aa.height() / zr).roundToInt().coerceAtLeast(1)

@@ -159,7 +159,7 @@ fun ShutterButton(
             )
         }
         val innerColor =
-            if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO ||
+            if (state.mode == CamMode.VIDEO ||
                 state.mode == CamMode.TIME_LAPSE || recording
             ) Color(0xFFFF3B30) else Color.White
         Box(
@@ -384,57 +384,6 @@ private fun GradeSwatches(
     }
 }
 
-/** Intensity + warmth sliders: real adjustments layered onto the active grade. */
-@Composable
-private fun GradeAdjustSliders(state: CameraState) {
-    if (state.activeGrade() == null) return
-    Spacer(Modifier.height(14.dp))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("Intensitas", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, modifier = Modifier.width(76.dp))
-        Slider(
-            value = state.gradeIntensity,
-            onValueChange = { state.gradeIntensity = it },
-            onValueChangeFinished = { state.persistAll() },
-            valueRange = 0f..1f,
-            modifier = Modifier.weight(1f),
-            colors = SliderDefaults.colors(
-                thumbColor = IosYellow,
-                activeTrackColor = Color.White.copy(alpha = 0.85f),
-                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
-            )
-        )
-        Text(
-            "${(state.gradeIntensity * 100).toInt()}%",
-            color = IosYellow, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.width(44.dp),
-            textAlign = androidx.compose.ui.text.style.TextAlign.End
-        )
-    }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("Tone", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp, modifier = Modifier.width(76.dp))
-        Text("Dingin", color = Color.White.copy(alpha = 0.5f), fontSize = 9.sp)
-        Slider(
-            value = state.gradeWarmth,
-            onValueChange = { state.gradeWarmth = it },
-            onValueChangeFinished = { state.persistAll() },
-            valueRange = -30f..30f,
-            modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
-            colors = SliderDefaults.colors(
-                thumbColor = IosYellow,
-                activeTrackColor = Color.White.copy(alpha = 0.85f),
-                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
-            )
-        )
-        Text("Hangat", color = Color.White.copy(alpha = 0.5f), fontSize = 9.sp)
-    }
-    Spacer(Modifier.height(4.dp))
-    Text(
-        "Diterapkan nyata pada foto saat dijepret" +
-            if (android.os.Build.VERSION.SDK_INT >= 31) " dan terlihat langsung di pratinjau." else ".",
-        color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
-    )
-}
-
 /** The ƒ slider: controls Portrait background-blur strength on the segmentation path. */
 @Composable
 fun ApertureSlider(state: CameraState) {
@@ -487,7 +436,7 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
         Spacer(Modifier.height(12.dp))
         when (kind) {
             SheetKind.FLASH -> {
-                if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) {
+                if (state.mode == CamMode.VIDEO) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OptionChip("Mati", !state.videoTorch) {
                             if (state.videoTorch) {
@@ -551,32 +500,10 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                     OptionChip("1:1", state.aspect == PhotoAspect.SQUARE) { actions.onAspect(PhotoAspect.SQUARE) }
                 }
             }
-            SheetKind.FILTER -> {
-                GradeSwatches(
-                    presets = FilterPresets,
-                    selectedId = state.filterId,
-                    intensity = state.gradeIntensity,
-                    onSelect = { id ->
-                        state.filterId = id
-                        if (id != null) state.styleId = null
-                        state.persistAll()
-                    }
-                )
-                GradeAdjustSliders(state)
-            }
-            SheetKind.STYLES -> {
-                GradeSwatches(
-                    presets = StylePresets,
-                    selectedId = state.styleId,
-                    intensity = state.gradeIntensity,
-                    onSelect = { id ->
-                        state.styleId = id
-                        if (id != null) state.filterId = null
-                        state.persistAll()
-                    }
-                )
-                GradeAdjustSliders(state)
-            }
+            // FILTER / STYLES never reach this panel — Sheet26 routes them
+            // to the iOS tick adjustment bar (IosAdjustBar). Their old
+            // branches here (and the GradeAdjustSliders helper) were dead
+            // code and are removed so nothing fake lingers in the tree.
             SheetKind.APERTURE -> {
                 ApertureSlider(state)
             }
@@ -613,8 +540,6 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                         Spacer(Modifier.height(8.dp))
                         Text(
                             when {
-                                state.mode == CamMode.SLO_MO ->
-                                    "SLO-MO memakai stabilisasi hardware (API kamera) bila tersedia; EIS software berlaku untuk mode VIDEO."
                                 state.eisActive ->
                                     "EIS software (gyro) sedang aktif."
                                 state.eisFailed && hwStab ->

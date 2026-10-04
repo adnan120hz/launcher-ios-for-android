@@ -285,40 +285,11 @@ private fun CameraScreenContent() {
             return
         }
         try {
-            val sloMoWanted = state.mode == CamMode.SLO_MO && state.caps.sloMoFps >= 120
             controller.startRecording(state.micGranted) { uri, ok ->
                 state.isRecording = false
                 state.quickTake = false
                 if (ok && uri != null) {
-                    if (sloMoWanted) {
-                        // 2.0.0 item 4: real slo-mo — measure what the HAL
-                        // actually delivered, then retime to 30fps playback
-                        // when it truly is high-speed. The toast reports
-                        // the measured numbers either way (honest labels).
-                        state.sloMoProcessing = true
-                        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            val res = SloMoRetime.retime(context, uri)
-                            kotlinx.coroutines.withContext(
-                                kotlinx.coroutines.Dispatchers.Main
-                            ) {
-                                state.sloMoProcessing = false
-                                state.toast = when {
-                                    res.retimedUri != null ->
-                                        "SLO-MO jadi: ${res.measuredFps.roundToInt()} fps " +
-                                            "diputar 30 fps (${SloMoRetime.factorText(res.measuredFps)} " +
-                                            "lebih lambat, tanpa audio)"
-                                    res.measuredFps > 0f ->
-                                        "SLO-MO tidak tercapai — device merekam " +
-                                            "${res.measuredFps.roundToInt()} fps; video asli disimpan"
-                                    else ->
-                                        "SLO-MO gagal diproses — video asli disimpan"
-                                }
-                                refreshThumb()
-                            }
-                        }
-                    } else {
-                        refreshThumb()
-                    }
+                    refreshThumb()
                 } else if (!ok) {
                     state.toast = "Gagal merekam video"
                 }
@@ -629,7 +600,7 @@ private fun CameraScreenContent() {
         state.mode = m
         state.sheet = SheetKind.NONE
         state.countdown = null
-        if ((m == CamMode.VIDEO || m == CamMode.SLO_MO) && !state.micGranted && !state.micAsked) {
+        if (m == CamMode.VIDEO && !state.micGranted && !state.micAsked) {
             requestMic()
         }
     }
@@ -659,7 +630,7 @@ private fun CameraScreenContent() {
                 state.panoSweeping -> finishPano()
                 state.mode == CamMode.PANO -> startPano()
                 state.mode == CamMode.TIME_LAPSE -> startTimelapse()
-                state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO ->
+                state.mode == CamMode.VIDEO ->
                     when {
                         state.eisActive -> startEisRecording()
                         // Pipeline still spinning up: park the tap; the
@@ -878,15 +849,19 @@ private fun CameraScreenContent() {
                 controller.setExposure(state.exposureIndex)
             }
             controller.setFlashMode(state.flash)
+            // Hardware stabilisation is (re)applied on every successful
+            // bind too — belt and braces with the ACTION effect above, so
+            // a post-EIS-failure rebind can never lose it to effect
+            // ordering (the "EIS ga ada efek" chain).
+            if (state.mode == CamMode.VIDEO) {
+                controller.setVideoStabilization(state.actionOn)
+            }
             when (state.mode) {
                 CamMode.VIDEO -> controller.setTargetFps(state.fps)
-                CamMode.SLO_MO -> controller.setTargetFps(
-                    state.caps.sloMoFps.coerceIn(60, 240)
-                )
                 else -> Unit
             }
             controller.setTorch(
-                (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) && state.videoTorch
+                state.mode == CamMode.VIDEO && state.videoTorch
             )
             applyZoomAbsolute(state.zoomRatio)
         } else {
@@ -1051,23 +1026,22 @@ private fun CameraScreenContent() {
 
     LaunchedEffect(state.exposureIndex) { controller.setExposure(state.exposureIndex) }
 
-    LaunchedEffect(state.mode, state.fps, state.caps.sloMoFps) {
+    LaunchedEffect(state.mode, state.fps) {
         when (state.mode) {
             CamMode.VIDEO -> controller.setTargetFps(state.fps)
-            CamMode.SLO_MO -> if (state.caps.sloMoFps >= 120) {
-                // Record at the highest frame rate this device exposes.
-                controller.setTargetFps(state.caps.sloMoFps.coerceIn(60, 240))
-            }
             else -> Unit
         }
     }
 
-    // Action mode: real video stabilization, only ever shown when the
-    // device reports it as supported.
-    LaunchedEffect(state.mode, state.actionOn) {
+    // Action mode: real hardware video stabilization behind ACTION.
+    // eisFailed/eisActive are keys on purpose (ROMBAK fix): when the
+    // software pipeline dies and CameraX rebinds, this effect re-runs and
+    // re-applies CONTROL_VIDEO_STABILIZATION_MODE_ON to the fresh CameraX
+    // camera — otherwise the fallback recording silently lost the very
+    // hardware stabilisation that made the old build feel stable.
+    LaunchedEffect(state.mode, state.actionOn, state.eisFailed, state.eisActive) {
         controller.setVideoStabilization(
-            state.actionOn &&
-                (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO)
+            state.actionOn && state.mode == CamMode.VIDEO
         )
     }
 

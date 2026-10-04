@@ -44,11 +44,12 @@ fun ArcDial(state: CameraState, modifier: Modifier = Modifier) {
             val r = size.height * 1.62f
             for (i in 0..72) {
                 val tt = i / 72f
-                // 2.0.0 direction fix: the ribbon moves WITH the finger —
-                // zooming in (drag right) sweeps the ticks rightward under
-                // the needle. The old sign swept them left, so the dial
-                // looked reversed against the gesture (user report).
-                val angDeg = -90f - (tt - tNow) * sweep
+                // Direction (restored baseline, user verdict on 2.0.0):
+                // stop values ASCEND toward the right of the needle —
+                // 0.5 · 1x · 2x · 8x read left-to-right like iOS. The
+                // 2.0.0 sign flip put 8x on the wrong side ("angka 8 di
+                // depan, kebalik") and is reverted here.
+                val angDeg = -90f + (tt - tNow) * sweep
                 if (angDeg < -170f || angDeg > -10f) continue
                 val rad = Math.toRadians(angDeg.toDouble())
                 val major = i % 6 == 0
@@ -74,7 +75,7 @@ fun ArcDial(state: CameraState, modifier: Modifier = Modifier) {
         // stop labels (ratio + equivalent MM) riding the arc
         state.quickStops().forEach { stop ->
             val tt = tOf(stop, min, max)
-            val angDeg = -90f - (tt - tNow) * sweep
+            val angDeg = -90f + (tt - tNow) * sweep
             if (angDeg in -158f..-22f) {
                 val rad = Math.toRadians(angDeg.toDouble())
                 val rDp = h * 1.62f - 42.dp

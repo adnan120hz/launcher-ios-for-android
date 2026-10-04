@@ -34,8 +34,6 @@ data class DeviceCaps(
     val fpsOptions: List<Int> = listOf(30),
     val maxFps: Int = 30,
     val hasFlashUnit: Boolean = false,
-    /** Highest high-speed (slow-motion) fps the device exposes; 0 = none. */
-    val sloMoFps: Int = 0,
     /** True when an AVC encoder usable for the time-lapse pipeline exists. */
     val timelapseAvailable: Boolean = false,
     /** True when CONTROL_VIDEO_STABILIZATION_MODE_ON is supported (Action mode). */
@@ -136,19 +134,6 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
     }
     val tier1 = logical.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
 
-    // Slow-motion: real high-speed ranges live on the stream configuration map,
-    // not in the AE ranges (those usually top out at 60).
-    var sloMax = 0
-    try {
-        val scm = logical.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        // Only trust the ranges when the HAL also publishes high-speed
-        // sizes: some HALs list ranges without any usable size, and
-        // offering SLO-MO there would be a fake feature.
-        if (scm != null && !scm.highSpeedVideoSizes.isNullOrEmpty()) {
-            scm.highSpeedVideoFpsRanges?.forEach { r -> if (r.upper > sloMax) sloMax = r.upper }
-        }
-    } catch (e: Throwable) { /* device without high-speed map */ }
-
     val stabModes = logical.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
     val stab = stabModes?.any { it == 1 } == true // 1 = CONTROL_VIDEO_STABILIZATION_MODE_ON
 
@@ -195,7 +180,6 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
         fpsOptions = if (fpsOpts.isEmpty()) listOf(30) else fpsOpts,
         maxFps = fpsRanges?.maxOfOrNull { it.upper } ?: 30,
         hasFlashUnit = tier1,
-        sloMoFps = sloMax,
         timelapseAvailable = avcEncoderAvailable(),
         videoStabilization = stab,
         oisAvailable = ois,

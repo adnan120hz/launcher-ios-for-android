@@ -14,8 +14,6 @@ import kotlin.math.roundToInt
 
 enum class CamMode(val label: String) {
     TIME_LAPSE("TIME-LAPSE"),
-    SLO_MO("SLO-MO"),
-    CINEMATIC("CINEMATIC"),
     VIDEO("VIDEO"),
     PHOTO("PHOTO"),
     PORTRAIT("PORTRAIT"),
@@ -89,9 +87,6 @@ class CameraState(context: Context) {
      */
     var zoomDialDriven by mutableStateOf(false)
 
-    /** Session flag: the CINEMATIC "not supported" toast shows ONCE. */
-    var cinematicNoticeShown by mutableStateOf(false)
-
     // First-run onboarding ("Developer Adnan.120hz" intro): shown once,
     // persisted, re-openable from Settings. Runtime visibility is kept
     // separate so re-opening does not reset the "seen" flag.
@@ -156,8 +151,6 @@ class CameraState(context: Context) {
     var countdown by mutableStateOf<Int?>(null)
     var isRecording by mutableStateOf(false)
     var recordSeconds by mutableStateOf(0)
-    /** SLO-MO file is being measured/retimed off the main thread. */
-    var sloMoProcessing by mutableStateOf(false)
     var quickTake by mutableStateOf(false)
 
     var thumbBitmap by mutableStateOf<Bitmap?>(null)
@@ -266,12 +259,11 @@ class CameraState(context: Context) {
         get() = caps.logicalMinZoomRatio < 0.99f || caps.backSessions.any { it.ratio < 0.95f }
 
     /**
-     * Capability-based mode availability: CINEMATIC has no reliable
-     * public-API path on this platform, so it stays visible in the carousel
-     * but dimmed and unselectable; SLO-MO needs real >=120fps support.
+     * Capability-based mode availability for the five real modes.
      * PANO is real (gyro-guided sweep + cylindrical stitch, Pano.kt) and
      * always available — without a gyroscope it falls back to timed
-     * captures with the same guide.
+     * captures with the same guide. (CINEMATIC and SLO-MO were removed
+     * entirely by user order — no ghost modes remain.)
      */
     fun modeAvailable(m: CamMode): Boolean = when (m) {
         CamMode.PHOTO, CamMode.VIDEO -> true
@@ -279,9 +271,7 @@ class CameraState(context: Context) {
         // ML Kit segmentation portrait pipeline.
         CamMode.PORTRAIT -> bokehExtAvailable || PortraitFallback.available
         CamMode.TIME_LAPSE -> caps.timelapseAvailable
-        CamMode.SLO_MO -> caps.sloMoFps >= 120
         CamMode.PANO -> true
-        CamMode.CINEMATIC -> false
     }
 
     /** ExtensionMode to bind with, or NONE. Portrait=Bokeh, Night=Night extension. */

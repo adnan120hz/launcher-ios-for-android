@@ -146,15 +146,10 @@ class EisPipeline(private val context: Context) {
 
     // -- first-frame safety net (2.0.0, behaviour-neutral) ---------------------
     private val framesPresented = AtomicLong(0)
+    /** Any GL frame drawn at all (preview or encoder) — the watchdog's
+     *  "is this pipeline alive" signal. */
+    private val framesDrawn = AtomicLong(0)
     private val firstFrameNotified = AtomicBoolean(false)
-
-    // -- zoom-aware correction gain (2.0.0 item 6) ------------------------------
-    // Smoothed zoom velocity (log-ratio per second). While the user zooms,
-    // the correction gain eases down so stabilisation never fights the zoom
-    // move (the "kaku" complaint); at rest the full old gain returns.
-    @Volatile private var zoomRateSmooth = 0f
-    private var lastZoomValue = 1f
-    private var lastZoomTimeNs = 0L
 
     // -- encoder --------------------------------------------------------------
     private var videoCodec: MediaCodec? = null
@@ -211,13 +206,17 @@ class EisPipeline(private val context: Context) {
                 startOnThread(front)
                 running = true
                 mainHandler.post { listener?.onStarted() }
-                // Watchdog (2.0.0 safety net): a pipeline that configures
-                // "successfully" but never presents a frame would otherwise
-                // sit on a black viewfinder forever. Fail honestly after a
-                // generous grace period; the caller falls back to the
-                // CameraX path. Never fires on a healthy pipeline.
+                // Watchdog (safety net, de-fanged by user order): the old
+                // 1500 ms zero-preview-frame rule could execute a HEALTHY
+                // pipeline on a slow entry HAL whose Camera2 session simply
+                // needs longer to produce its first frame — ACTION then
+                // looked stuck and fell back with no stabilisation at all.
+                // Now the pipeline is only failed on PROVEN total death:
+                // a generous 6 s grace and not one GL frame drawn anywhere
+                // (preview or encoder). A pipeline drawing anything is
+                // alive and is never touched.
                 handler?.postDelayed({
-                    if (running && framesPresented.get() == 0L) {
+                    if (running && framesDrawn.get() == 0L) {
                         mainHandler.post {
                             listener?.onFailed(
                                 "Pipeline EIS tidak menampilkan frame di perangkat ini"
@@ -269,25 +268,10 @@ class EisPipeline(private val context: Context) {
     }
 
     fun setZoom(ratio: Float) {
-        val v = ratio.coerceIn(1f, 8f)
-        // Track zoom velocity for the adaptive correction gain (item 6):
-        // log-ratio change per second, lightly smoothed.
-        val now = System.nanoTime()
-        if (lastZoomTimeNs > 0L) {
-            val dt = (now - lastZoomTimeNs) / 1e9f
-            if (dt >= 0.005f) {
-                val rate = abs(
-                    kotlin.math.ln((v / lastZoomValue.coerceAtLeast(0.05f)).toDouble())
-                ).toFloat() / dt
-                zoomRateSmooth += (rate - zoomRateSmooth) * 0.35f
-                lastZoomTimeNs = now
-                lastZoomValue = v
-            }
-        } else {
-            lastZoomTimeNs = now
-            lastZoomValue = v
-        }
-        zoomRatio = v
+        // Baseline 80dcd84 exactly (user order: EIS is the old system —
+        // the 2.0.0 zoom-velocity gain dilution is removed so the warp
+        // correction is never weakened).
+        zoomRatio = ratio.coerceIn(1f, 8f)
     }
 
     fun setTorch(on: Boolean) {
@@ -1040,24 +1024,8 @@ class EisPipeline(private val context: Context) {
                     q = GyroTracker.slerp(prev, q, maxStep / ang)
                 }
             }
-            // Zoom-aware gain (2.0.0 item 6): while the user is zooming,
-            // ease the correction toward identity so stabilisation never
-            // fights the zoom move (the "kaku" feel); as the zoom settles
-            // the velocity decays (τ≈0.4 s) and the full correction
-            // returns. The warp below already scales focal length by the
-            // live zoom, so zooming stays geometrically consistent.
-            val corrDtNs = if (prevCorrectionTsNs > 0L) {
-                (frameTsNs - prevCorrectionTsNs).coerceAtLeast(0L)
-            } else {
-                0L
-            }
-            zoomRateSmooth *= kotlin.math.exp(-corrDtNs / 4e8).toFloat()
             prevCorrectionQuat = q
             prevCorrectionTsNs = frameTsNs
-            val gainScale = 1f / (1f + zoomRateSmooth * 1.1f)
-            if (gainScale < 0.999f) {
-                q = GyroTracker.slerp(IDENTITY_QUAT, q, gainScale)
-            }
             var r = GyroTracker.toMatrix3(q)
             // Re-express the device-frame rotation in the display frame.
             val psi = Math.toRadians(displayRotationDeg.toDouble()).toFloat()
@@ -1090,6 +1058,7 @@ class EisPipeline(private val context: Context) {
         st.getTransformMatrix(texMatrix)
         // Row-major math on CPU; GLSL wants column-major (ES2 has no transpose).
         val warp = transpose3(computeWarp(st.timestamp))
+        framesDrawn.incrementAndGet()
 
         val aPos = GLES20.glGetAttribLocation(program, "aPos")
         val uTex = GLES20.glGetUniformLocation(program, "uTex")
@@ -1265,12 +1234,10 @@ class EisPipeline(private val context: Context) {
     }
 
     companion object {
-        /** First-frame watchdog grace (2.0.0 safety net): fail honestly
-         *  if a "started" pipeline never presents a preview frame. */
-        private const val FRAME_WATCHDOG_MS = 1500L
-
-        /** Identity quaternion (w, x, y, z) — gain-scale slerp target. */
-        private val IDENTITY_QUAT = floatArrayOf(1f, 0f, 0f, 0f)
+        /** First-frame watchdog grace: fail only on proven total death
+         *  (zero GL frames drawn anywhere after 6 s). Never kills a
+         *  pipeline that is merely slow to start. */
+        private const val FRAME_WATCHDOG_MS = 6000L
 
         private fun transpose3(m: FloatArray): FloatArray = floatArrayOf(
             m[0], m[3], m[6],

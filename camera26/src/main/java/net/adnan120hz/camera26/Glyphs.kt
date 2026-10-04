@@ -29,18 +29,21 @@ import kotlin.math.sin
 val IosYellow = Color(0xFFFFD60A)
 
 // ---------------------------------------------------------------------------
-// Liquid Glass material (iOS 26). Translucent light-tinted gray with a
-// vertical sheen: the live preview faintly shows through, a bright rim and a
-// soft top highlight sell real glass.
+// Liquid Glass material (iOS 26), calmed down (user: reflections were
+// excessive and entry GPUs lagged): darker, flatter translucent gray with
+// a faint sheen and a soft rim — closer to Apple's real glass, and every
+// surface is a STATIC gradient fill (there is no live blur anywhere in
+// this UI; the expensive per-frame layers live only in the carousel
+// bubble and are tiered by PerfTier there).
 // ---------------------------------------------------------------------------
 val GlassPanelBrush = Brush.verticalGradient(
-    listOf(Color(0xDB636366), Color(0xC9404043))
+    listOf(Color(0xCC333336), Color(0xBF26262A))
 )
 val GlassPillBrush = Brush.verticalGradient(
-    listOf(Color(0xC957575B), Color(0xB03C3C40))
+    listOf(Color(0xB84A4A4F), Color(0xA6333338))
 )
-val GlassRim = Color.White.copy(alpha = 0.32f)
-val GlassSheen = Color.White.copy(alpha = 0.20f)
+val GlassRim = Color.White.copy(alpha = 0.20f)
+val GlassSheen = Color.White.copy(alpha = 0.10f)
 val GlassButton = Color(0xF238383B)
 
 @Composable

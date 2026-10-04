@@ -69,7 +69,6 @@ class CameraUiScreenshotTest {
             fpsOptions = listOf(24, 30, 60),
             maxFps = 60,
             hasFlashUnit = true,
-            sloMoFps = 240,
             timelapseAvailable = true,
             videoStabilization = true,
             oisAvailable = true,
@@ -272,10 +271,26 @@ class CameraUiScreenshotTest {
     }
 
     @Test
-    fun sloMoMode() {
+    fun zoomDialRest() {
+        // Zoom arc dial at 1x (ROMBAK bukti arah): stop labels must read
+        // ascending left-to-right — 0.5 · 1x (jarum) · 2x · 8x. The 2.0.0
+        // sign flip put 8x on the wrong side ("angka 8 di depan").
         val state = baseState(paparazzi.context).apply {
-            mode = CamMode.SLO_MO
-            aspect = PhotoAspect.RATIO_16_9
+            dialVisible = true
+            zoomRatio = 1f
+            zoomTarget = 1f
+        }
+        paparazzi.snapshot { Harness(state) }
+    }
+
+    @Test
+    fun zoomDialZoomed4x() {
+        // Same dial mid-zoom at 4x: labels keep ascending order, the 4x
+        // position rides under the fixed needle.
+        val state = baseState(paparazzi.context).apply {
+            dialVisible = true
+            zoomRatio = 4f
+            zoomTarget = 4f
         }
         paparazzi.snapshot { Harness(state) }
     }

@@ -172,7 +172,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                         // Format pill for the video family: "HD RES  30 FPS"
                         // (SLO-MO shows its real frame rate, e.g. 240 FPS).
                         val videoFamily = state.mode == CamMode.VIDEO ||
-                            state.mode == CamMode.SLO_MO || state.mode == CamMode.TIME_LAPSE
+                            state.mode == CamMode.TIME_LAPSE
                         Column {
                             if (videoFamily && !state.isRecording && !state.timelapseRunning) {
                                 GlassPill(
@@ -187,8 +187,6 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                     Text(" RES", color = Color.White.copy(alpha = 0.55f), fontSize = 10.sp)
                                     Spacer(Modifier.width(9.dp))
                                     val fpsText = when (state.mode) {
-                                        CamMode.SLO_MO ->
-                                            if (state.caps.sloMoFps > 0) state.caps.sloMoFps else state.fps
                                         CamMode.TIME_LAPSE -> 30
                                         else -> state.fps
                                     }
@@ -208,8 +206,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                             // on the CameraX path (incl. the fallback after
                             // a failed software start, the old build's
                             // "not supported but actually working" case).
-                            val videoFamily = state.mode == CamMode.VIDEO ||
-                                state.mode == CamMode.SLO_MO
+                            val videoFamily = state.mode == CamMode.VIDEO
                             val hwStabPill = videoFamily && state.actionOn && !state.eisActive &&
                                 (state.caps.videoStabilization || state.caps.oisAvailable)
                             if (state.eisActive || hwStabPill) {
@@ -239,7 +236,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                             // pill outline unchanged) — no more precision taps.
                             GlassPill(hPad = 6.dp, vPad = 1.dp) {
                                 val videoFamilyPill = state.mode == CamMode.VIDEO ||
-                                    state.mode == CamMode.SLO_MO || state.mode == CamMode.TIME_LAPSE
+                                    state.mode == CamMode.TIME_LAPSE
                                 if (!videoFamilyPill && state.nightExtAvailable) {
                                     Box(
                                         Modifier
@@ -262,7 +259,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                 }
                                 run {
                                     val flashColor = when {
-                                        state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO ->
+                                        state.mode == CamMode.VIDEO ->
                                             if (state.videoTorch) IosYellow else Color.White
                                         state.flash == FlashSetting.OFF -> Color.White
                                         else -> IosYellow
@@ -271,7 +268,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                         Modifier
                                             .size(40.dp)
                                             .clickable {
-                                                if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) {
+                                                if (state.mode == CamMode.VIDEO) {
                                                     val wasOn = state.videoTorch
                                                     actions.onToggleTorch()
                                                     state.showBanner(
@@ -286,8 +283,8 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                         FlashGlyph(
                                             flashColor,
                                             Modifier.size(20.dp),
-                                            off = state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO && state.flash == FlashSetting.OFF,
-                                            auto = state.mode != CamMode.VIDEO && state.mode != CamMode.SLO_MO && state.flash == FlashSetting.AUTO
+                                            off = state.mode != CamMode.VIDEO && state.flash == FlashSetting.OFF,
+                                            auto = state.mode != CamMode.VIDEO && state.flash == FlashSetting.AUTO
                                         )
                                     }
                                 }
@@ -469,25 +466,6 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                         .padding(horizontal = 14.dp, vertical = 5.dp)
                 ) {
                     Text(t, color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-
-        // SLO-MO post-processing indicator (2.0.0 item 4): the recorded
-        // high-speed file is being measured and retimed off-thread.
-        if (state.sloMoProcessing) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(top = 96.dp),
-                contentAlignment = Alignment.TopCenter
-            ) {
-                GlassPill {
-                    Text(
-                        "Memproses SLO-MO…",
-                        color = IosYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold
-                    )
                 }
             }
         }
@@ -687,12 +665,15 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
 
     fun settleDrag() {
         val drag = state.carouselDragPx
-        // fix8: settle by the shared one-hop rule (nextAvailableModeIndex,
-        // also used by the preview swipe). The old pitch-count math let a
-        // firm flick jump TWO modes (beta device: PORTRAIT -> PHOTO landed
-        // on VIDEO), and around unavailable modes its walk-back branch
-        // moved the base target against the drag spring — the SLO-MO /
-        // TIME-LAPSE "mental-mental".
+        // fix8 settle rule (nextAvailableModeIndex, shared with the preview
+        // swipe): at most ONE hop toward the next AVAILABLE mode.
+        // ROMBAK fix: the "from" index MUST be read live here. settleDrag
+        // is captured by pointerInput(Unit) from the FIRST composition —
+        // where the mode is always PHOTO — so deriving the hop from that
+        // frozen index made gestures from VIDEO land on PORTRAIT and made
+        // PHOTO itself unreachable ("pengen balik ke PHOTO ga bisa, malah
+        // ke PORTRAIT"). state.mode is read at event time now; PHOTO is a
+        // normal landing spot again from both directions.
         val pitchPx = if (centersPx.size > 1) {
             (centersPx.last() - centersPx.first()) / (centersPx.size - 1)
         } else {
@@ -700,11 +681,12 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
         }
         val steps = (-drag / pitchPx).roundToInt()
         if (steps != 0) {
+            val fromIdx = modes.indexOf(state.mode).coerceAtLeast(0)
             val dir = if (steps > 0) 1 else -1
-            val target = nextAvailableModeIndex(modes, selectedIdx, dir) {
+            val target = nextAvailableModeIndex(modes, fromIdx, dir) {
                 state.modeAvailable(it)
             }
-            if (target != selectedIdx) actions.onModeSelect(modes[target])
+            if (target != fromIdx) actions.onModeSelect(modes[target])
         }
         // One settle spring (same spec as the base slide) returns the drag
         // offset to rest — no second animation fighting the landing.
@@ -733,6 +715,10 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
         val pillWidthPx = with(density) { pillWidthDp.toPx() }
         val fadePx = with(density) { 24.dp.toPx() }
         val translation = pillHalfPx + baseAnim + state.carouselDragPx
+        // The tap handler below is captured by pointerInput(Unit) too —
+        // it must hit-test against the LIVE strip position, not the
+        // first frame's. rememberUpdatedState re-reads it every event.
+        val liveTranslation by androidx.compose.runtime.rememberUpdatedState(translation)
         Box(
             Modifier
                 .width(pillWidthDp)
@@ -751,7 +737,7 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
                             var best = -1
                             var bestDist = Float.MAX_VALUE
                             modes.indices.forEach { i ->
-                                val d = abs(pos.x - (translation + centersPx[i]))
+                                val d = abs(pos.x - (liveTranslation + centersPx[i]))
                                 if (d < bestDist) {
                                     bestDist = d
                                     best = i
@@ -759,21 +745,11 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
                             }
                             if (best >= 0) {
                                 val m = modes[best]
+                                val curIdx = modes.indexOf(state.mode).coerceAtLeast(0)
                                 when {
-                                    best == selectedIdx -> actions.onOpenSheet(SheetKind.GRID)
+                                    best == curIdx -> actions.onOpenSheet(SheetKind.GRID)
                                     !state.modeAvailable(m) -> {
-                                        // CINEMATIC explains itself ONCE per
-                                        // session; after that the dimmed
-                                        // label stays silent when tapped.
-                                        if (m == CamMode.CINEMATIC) {
-                                            if (!state.cinematicNoticeShown) {
-                                                state.cinematicNoticeShown = true
-                                                state.toast =
-                                                    "Mode CINEMATIC hanya tersedia di perangkat yang mendukungnya"
-                                            }
-                                        } else {
-                                            state.toast = "Mode ${m.label} tidak didukung di perangkat ini"
-                                        }
+                                        state.toast = "Mode ${m.label} tidak didukung di perangkat ini"
                                     }
                                     else -> actions.onModeSelect(m)
                                 }
@@ -822,9 +798,12 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
             val bulgeX by animateFloatAsState(bulgeXTarget, bubbleSpec, label = "bubbleX")
             val bulgeY by animateFloatAsState(bulgeYTarget, bubbleSpec, label = "bubbleY")
             val bubbleProgress = ((bulgeX - 1f) / 0.15f).coerceIn(0f, 1f)
-            // Entry-tier GPUs skip the extra glass layers entirely (the
-            // swell itself stays); mid/flagship render the full glass.
-            val fullGlass = state.caps.perfTier != PerfTier.ENTRY
+            // Liquid Glass cost tiers (user: "UI-nya lag parah" on entry
+            // GPUs + "refleksi berlebihan"): ENTRY renders NO extra glass
+            // layers (plain capsule only), MID gets the calmer frost + rim
+            // without the specular sweep, FLAGSHIP gets all three — with
+            // reflections toned down toward real iOS glass everywhere.
+            val tier = state.caps.perfTier
             val selWidthDp = with(density) { textWidthsPx[selectedIdx].toDp() } + 30.dp
             Box(
                 Modifier
@@ -836,12 +815,12 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
                         scaleY = bulgeY
                     }
                     .clip(RoundedCornerShape(50))
-                    .background(Color.White.copy(alpha = 0.30f))
+                    .background(Color.White.copy(alpha = 0.24f))
             ) {
                 // Liquid Glass layers — alpha follows the swell, so at rest
                 // the capsule is pixel-identical to the plain one: frost
                 // gradient, specular highlight across the top, bright rim.
-                if (fullGlass) {
+                if (tier != PerfTier.ENTRY) {
                     Box(
                         Modifier
                             .fillMaxSize()
@@ -849,33 +828,35 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
                             .background(
                                 Brush.verticalGradient(
                                     listOf(
-                                        Color.White.copy(alpha = 0.38f),
-                                        Color.White.copy(alpha = 0.10f),
-                                        Color.White.copy(alpha = 0.22f)
+                                        Color.White.copy(alpha = 0.18f),
+                                        Color.White.copy(alpha = 0.05f),
+                                        Color.White.copy(alpha = 0.10f)
                                     )
                                 )
                             )
                     )
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .fillMaxHeight(0.55f)
-                            .graphicsLayer { alpha = bubbleProgress }
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(
-                                        Color.White.copy(alpha = 0.55f),
-                                        Color.White.copy(alpha = 0f)
+                    if (tier == PerfTier.FLAGSHIP) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .fillMaxHeight(0.55f)
+                                .graphicsLayer { alpha = bubbleProgress }
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color.White.copy(alpha = 0.22f),
+                                            Color.White.copy(alpha = 0f)
+                                        )
                                     )
                                 )
-                            )
-                    )
+                        )
+                    }
                     Box(
                         Modifier
                             .fillMaxSize()
                             .border(
                                 1.dp,
-                                Color.White.copy(alpha = 0.48f * bubbleProgress),
+                                Color.White.copy(alpha = 0.26f * bubbleProgress),
                                 RoundedCornerShape(50)
                             )
                     )
@@ -884,22 +865,20 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
             // Sliding label strip (clipped by the pill itself). Unbounded width:
             // the strip is wider than the pill, and a width-capped Row would
             // starve the labels past the pill's edge of any layout space.
-            Row(
+            // The iOS edge fade needs an offscreen compositing layer + a
+            // DstIn mask pass every frame — FLAGSHIP only; ENTRY/MID take
+            // the plain hard clip (no extra layer, no mask) for frame rate.
+            val fadeModifier = if (tier == PerfTier.FLAGSHIP) {
                 Modifier
-                    .fillMaxHeight()
-                    .wrapContentWidth(unbounded = true, align = Alignment.Start)
-                    .offset { IntOffset(translation.roundToInt(), 0) }
-                    // The edge fade must dissolve ONLY the label strip. With
-                    // an offscreen compositing layer, the DstIn mask applies
-                    // to this Row alone — without it, it punches through the
-                    // pill glass (and everything beneath) at the pill edges.
                     .graphicsLayer {
                         compositingStrategy = CompositingStrategy.Offscreen
                     }
                     .drawWithContent {
                         // iOS-style edge fade, aligned to the pill's window
                         // (strip coordinates): labels peeking at the pill's
-                        // ends dissolve instead of being hard-clipped.
+                        // ends dissolve instead of being hard-clipped. The
+                        // offscreen layer keeps the DstIn mask on this Row
+                        // alone instead of punching through the pill glass.
                         drawContent()
                         drawRect(
                             brush = Brush.horizontalGradient(
@@ -912,7 +891,16 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
                             ),
                             blendMode = BlendMode.DstIn
                         )
-                    },
+                    }
+            } else {
+                Modifier
+            }
+            Row(
+                Modifier
+                    .fillMaxHeight()
+                    .wrapContentWidth(unbounded = true, align = Alignment.Start)
+                    .offset { IntOffset(translation.roundToInt(), 0) }
+                    .then(fadeModifier),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 modes.forEachIndexed { i, m ->
@@ -1097,7 +1085,7 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
                     enabled = false) { c -> NightGlyph(c, Color(0xFF4C4C50), Modifier.size(28.dp)) }
             }
         }
-        CamMode.VIDEO, CamMode.SLO_MO -> {
+        CamMode.VIDEO -> {
             items += SheetItem("FLASH", state.videoTorch,
                 { actions.onToggleTorch() }) { c -> FlashGlyph(c, Modifier.size(28.dp)) }
             items += exposureItem
