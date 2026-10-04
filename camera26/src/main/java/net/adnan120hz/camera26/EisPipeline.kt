@@ -46,6 +46,7 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
 /**
@@ -79,6 +80,9 @@ class EisPipeline(
 
     interface Listener {
         fun onStarted()
+
+        /** First warped frame was actually presented to the preview. */
+        fun onFirstFrame() {}
         fun onFailed(reason: String)
         fun onRecordingSaved(uri: Uri)
         fun onRecordingFailed()
@@ -113,9 +117,9 @@ class EisPipeline(
     private var handler: Handler? = null
 
     // -- camera ---------------------------------------------------------------
-    private var cameraDevice: CameraDevice? = null
-    private var session: CameraCaptureSession? = null
-    private var cameraSurface: Surface? = null
+    @Volatile private var cameraDevice: CameraDevice? = null
+    @Volatile private var session: CameraCaptureSession? = null
+    @Volatile private var cameraSurface: Surface? = null
     private var frameSize = Size(1920, 1080)
     private var sensorOrientation = 0
     private var displayRotationDeg = 0
@@ -178,6 +182,14 @@ class EisPipeline(
     // not also fire onRecordingFailed (the caller reports the fallback).
     private var suppressRecordResult = false
 
+    // -- start safety (fix8) ----------------------------------------------------
+    /** Frames actually presented to the preview surface since start. */
+    private val framesPresented = AtomicLong(0)
+    private val firstFrameNotified = AtomicBoolean(false)
+    /** Failure is torn down + reported at most once per start. */
+    private val startFailed = AtomicBoolean(false)
+    @Volatile private var stopRequested = false
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val quadBuffer: ByteBuffer by lazy {
@@ -197,23 +209,79 @@ class EisPipeline(
         previewH = previewHeight
         frontFacing = front
         displayRotationDeg = currentDisplayRotationDeg()
+        framesPresented.set(0L)
+        firstFrameNotified.set(false)
+        startFailed.set(false)
+        stopRequested = false
         val t = HandlerThread("camera26-eis")
         t.start()
         thread = t
         handler = Handler(t.looper)
-        handler?.post {
-            try {
-                startOnThread(front)
-                running = true
-                mainHandler.post { listener?.onStarted() }
-            } catch (e: Throwable) {
-                cleanupOnThread()
-                mainHandler.post { listener?.onFailed(e.message ?: "EIS tidak dapat dimulai") }
+        // fix8: the blocking camera bring-up (latch waits for openCamera /
+        // createCaptureSession) runs on this starter thread, never on the
+        // pipeline thread that receives the Camera2 callbacks. Both the
+        // first release and fix7 waited on the callback thread itself, so
+        // a slow HAL turned start-up into stacked 5-second timeouts while
+        // CameraX was already unbound — a black viewfinder with nothing
+        // producing frames.
+        val starter = object : Runnable {
+            override fun run() {
+                try {
+                    startCameraOnThread(front)
+                    if (stopRequested) {
+                        handler?.post { cleanupOnThread() }
+                        return
+                    }
+                    running = true
+                    mainHandler.post { listener?.onStarted() }
+                    scheduleFrameWatchdog()
+                } catch (e: Throwable) {
+                    failStart(e)
+                }
+            }
+        }
+        Thread(starter, "camera26-eis-start").start()
+    }
+
+    /** Start failure: tear down once, report once, never while stopping. */
+    private fun failStart(e: Throwable) {
+        if (!startFailed.compareAndSet(false, true)) return
+        running = false
+        handler?.post { cleanupOnThread() }
+        if (!stopRequested) {
+            mainHandler.post {
+                listener?.onFailed(e.message ?: "EIS tidak dapat dimulai")
             }
         }
     }
 
+    /**
+     * Frame watchdog: [FRAME_WATCHDOG_MS] after a "successful" start the
+     * pipeline must have presented at least one real frame. If it claimed
+     * the camera but produced nothing, tear it down so the caller restores
+     * the CameraX preview — a black viewfinder must never persist.
+     */
+    private fun scheduleFrameWatchdog() {
+        val h = handler ?: return
+        h.postDelayed({
+            if (running && !stopRequested && framesPresented.get() == 0L &&
+                startFailed.compareAndSet(false, true)
+            ) {
+                running = false
+                try {
+                    cleanupOnThread()
+                } catch (e: Throwable) { /* best effort */ }
+                mainHandler.post {
+                    listener?.onFailed(
+                        "Stabilisasi software tidak berjalan di perangkat ini — rekam biasa"
+                    )
+                }
+            }
+        }, FRAME_WATCHDOG_MS)
+    }
+
     fun stop() {
+        stopRequested = true
         val h = handler
         if (h == null) {
             gyro.stop()
@@ -277,7 +345,7 @@ class EisPipeline(
         }
     }
 
-    private fun startOnThread(front: Boolean) {
+    private fun startCameraOnThread(front: Boolean) {
         if (!gyro.available) throw IllegalStateException("Sensor gerak tidak tersedia")
         val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val targetFacing = if (front) {
@@ -317,9 +385,35 @@ class EisPipeline(
         prevCorrectionTsNs = 0L
         shakeAmpEmaDeg = EisTuning.SHAKE_LOW_DEG
         cropCurrent = EisTuning.CROP_INITIAL
-        initGl()
+
+        // GL init first (baseline order of the first release), but executed
+        // on the pipeline thread so the EGL context stays confined there;
+        // this starter thread only waits for it.
+        val pipelineHandler = handler
+            ?: throw IllegalStateException("Pipeline thread tidak ada")
+        val glReady = CountDownLatch(1)
+        var glError: Throwable? = null
+        pipelineHandler.post {
+            try {
+                initGl()
+            } catch (e: Throwable) {
+                glError = e
+            }
+            glReady.countDown()
+        }
+        if (!glReady.await(5, TimeUnit.SECONDS)) {
+            throw IllegalStateException("GL tidak siap")
+        }
+        glError?.let { throw it }
+        if (stopRequested) throw IllegalStateException("Start dibatalkan")
 
         val st = surfaceTexture ?: throw IllegalStateException("SurfaceTexture gagal")
+        // ONE Surface over the SurfaceTexture for the whole session — the
+        // first release did exactly this. The fix7 staged loop re-wrapped
+        // the texture in a new Surface per attempt and could bind the
+        // session to a superseded/released surface (frames draining into a
+        // dead queue while onStarted had already fired).
+        cameraSurface = Surface(st)
 
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
@@ -351,79 +445,34 @@ class EisPipeline(
         openError?.let { throw it }
         val device = cameraDevice ?: throw IllegalStateException("Kamera gagal dibuka")
 
-        // Staged session sizes: some entry-level HALs reject the picked
-        // (large) stream size in a session even though they list it — step
-        // down through smaller sizes before giving up entirely.
-        var sessionOk = false
-        var lastError: Throwable? = null
-        for (attemptSize in sessionSizeAttempts(sizes)) {
-            frameSize = attemptSize
-            try {
-                st.setDefaultBufferSize(attemptSize.width, attemptSize.height)
-            } catch (e: Throwable) { /* texture already sized */ }
-            val attemptSurface = Surface(st)
-            val latch = CountDownLatch(1)
-            var attemptError: Throwable? = null
-            @Suppress("DEPRECATION")
-            device.createCaptureSession(
-                listOf(attemptSurface),
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(s: CameraCaptureSession) {
-                        session = s
-                        cameraSurface = attemptSurface
-                        latch.countDown()
-                    }
+        if (stopRequested) throw IllegalStateException("Start dibatalkan")
 
-                    override fun onConfigureFailed(s: CameraCaptureSession) {
-                        attemptError = IllegalStateException("Sesi kamera gagal")
-                        latch.countDown()
-                    }
-                },
-                handler
-            )
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                attemptError = IllegalStateException("Timeout sesi kamera")
-            }
-            if (attemptError == null && session != null) {
-                sessionOk = true
-                break
-            }
-            lastError = attemptError
-            try {
-                session?.close()
-            } catch (e: Throwable) { /* ignore */ }
-            session = null
-            if (cameraSurface !== attemptSurface) {
-                try {
-                    attemptSurface.release()
-                } catch (e: Throwable) { /* ignore */ }
-            }
+        // ONE capture session on the one surface (first-release baseline).
+        val sessionLatch = CountDownLatch(1)
+        var sessionError: Throwable? = null
+        val surface = cameraSurface ?: throw IllegalStateException("Surface kamera tidak ada")
+        @Suppress("DEPRECATION")
+        device.createCaptureSession(
+            listOf(surface),
+            object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(s: CameraCaptureSession) {
+                    session = s
+                    sessionLatch.countDown()
+                }
+
+                override fun onConfigureFailed(s: CameraCaptureSession) {
+                    sessionError = IllegalStateException("Sesi kamera gagal")
+                    sessionLatch.countDown()
+                }
+            },
+            handler
+        )
+        if (!sessionLatch.await(5, TimeUnit.SECONDS)) {
+            throw IllegalStateException("Timeout sesi kamera")
         }
-        if (!sessionOk) {
-            throw lastError ?: IllegalStateException("Sesi kamera gagal")
-        }
+        sessionError?.let { throw it }
+        if (stopRequested) throw IllegalStateException("Start dibatalkan")
         applyRepeatingRequest()
-    }
-
-    /**
-     * Ordered stream sizes to attempt for the capture session: the picked
-     * (quality-first) size, then progressively smaller fallbacks.
-     */
-    private fun sessionSizeAttempts(sizes: List<Size>): List<Size> {
-        val attempts = ArrayList<Size>()
-        attempts += frameSize
-        fun closestTo(tw: Int, th: Int): Size? = sizes.minByOrNull {
-            abs(it.width - tw) + abs(it.height - th)
-        }
-        if (sizes.isNotEmpty()) {
-            closestTo(1280, 720)?.let { attempts += it }
-            closestTo(640, 480)?.let { attempts += it }
-            sizes.minByOrNull { it.width.toLong() * it.height }?.let { attempts += it }
-        } else {
-            attempts += Size(1280, 720)
-            attempts += Size(640, 480)
-        }
-        return attempts.distinct()
     }
 
     private fun pickFrameSize(sizes: List<Size>): Size {
@@ -554,6 +603,7 @@ class EisPipeline(
         var codec: MediaCodec? = null
         var lastEncError: Throwable? = null
         for ((w, h) in dimAttempts) {
+            var c: MediaCodec? = null
             try {
                 val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
                 format.setInteger(
@@ -569,7 +619,7 @@ class EisPipeline(
                 )
                 format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
                 format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-                val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
                 c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 encoderInputSurface = c.createInputSurface()
                 c.start()
@@ -577,6 +627,15 @@ class EisPipeline(
                 break
             } catch (e: Throwable) {
                 lastEncError = e
+                // fix8: a half-configured codec from a failed attempt must
+                // be released, not leaked (native encoder instances are
+                // scarce on entry-level HALs).
+                try {
+                    c?.stop()
+                } catch (t: Throwable) { /* ignore */ }
+                try {
+                    c?.release()
+                } catch (t: Throwable) { /* ignore */ }
                 try {
                     encoderInputSurface?.release()
                 } catch (t: Throwable) { /* ignore */ }
@@ -1137,9 +1196,9 @@ class EisPipeline(
             fillCrop: Boolean,
             mirror: Boolean,
             presentationTimeNs: Long = -1L
-        ) {
-            if (surface == null || surface == EGL14.EGL_NO_SURFACE) return
-            if (!EGL14.eglMakeCurrent(display, surface, surface, ctx)) return
+        ): Boolean {
+            if (surface == null || surface == EGL14.EGL_NO_SURFACE) return false
+            if (!EGL14.eglMakeCurrent(display, surface, surface, ctx)) return false
             GLES20.glViewport(0, 0, width, height)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -1183,10 +1242,17 @@ class EisPipeline(
                     EGLExt.eglPresentationTimeANDROID(display, surface, presentationTimeNs)
                 } catch (e: Throwable) { /* older driver */ }
             }
-            EGL14.eglSwapBuffers(display, surface)
+            return EGL14.eglSwapBuffers(display, surface)
         }
 
-        drawTo(previewEglSurface, previewW, previewH, fillCrop = true, mirror = frontFacing)
+        if (drawTo(previewEglSurface, previewW, previewH, fillCrop = true, mirror = frontFacing)) {
+            // A frame was really presented: feed the watchdog and let the
+            // UI swap the CameraX preview out for this GL surface.
+            framesPresented.incrementAndGet()
+            if (firstFrameNotified.compareAndSet(false, true)) {
+                mainHandler.post { listener?.onFirstFrame() }
+            }
+        }
         if (recording && videoCodec != null) {
             // Normalise the video clock: first recorded frame is t=0, like
             // the audio track (approximate sync, both start at record time).
@@ -1286,6 +1352,9 @@ class EisPipeline(
     }
 
     companion object {
+        /** Max wait for the first presented frame before teardown. */
+        private const val FRAME_WATCHDOG_MS = 1500L
+
         private fun transpose3(m: FloatArray): FloatArray = floatArrayOf(
             m[0], m[3], m[6],
             m[1], m[4], m[7],

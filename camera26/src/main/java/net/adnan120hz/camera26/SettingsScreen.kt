@@ -46,7 +46,7 @@ fun CameraSettingsScreen(state: CameraState, onBack: () -> Unit) {
         } catch (e: Throwable) {
             null
         }
-    } ?: "0.5.0"
+    } ?: "1.0.0"
 
     fun openUrl(url: String) {
         try {

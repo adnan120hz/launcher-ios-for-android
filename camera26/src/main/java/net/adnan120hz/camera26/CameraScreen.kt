@@ -576,11 +576,16 @@ private fun CameraScreenContent() {
     }
 
     fun swipeMode(dir: Int) {
-        val modes = CamMode.values().filter { state.modeAvailable(it) }
+        // fix8: ONE settle rule shared with the pill drag (see
+        // nextAvailableModeIndex): a released gesture moves at most one
+        // hop, always landing on the next AVAILABLE mode in that
+        // direction — unavailable modes are never a landing spot and a
+        // swipe can never overshoot by a mode.
+        val modes = CamMode.values().toList()
         val idx = modes.indexOf(state.mode)
         if (idx < 0) return
-        val next = modes.getOrNull(idx + dir) ?: return
-        selectMode(next)
+        val target = nextAvailableModeIndex(modes, idx, dir) { state.modeAvailable(it) }
+        if (target != idx) selectMode(modes[target])
     }
 
     val actions = CameraActions(
@@ -766,7 +771,7 @@ private fun CameraScreenContent() {
                 context.packageManager.getPackageInfo(context.packageName, 0).versionName
             } catch (e: Throwable) {
                 null
-            } ?: "0.5.0"
+            } ?: "1.0.0"
             UpdateChecker.check(context, vn)
         }
         if (found != null) {
@@ -848,6 +853,9 @@ private fun CameraScreenContent() {
             if (controller.recordingActive) controller.stopRecording()
             controller.unbindAll()
             state.sessionBound = false
+            // The GL surface only replaces the CameraX preview once real
+            // frames have been presented (onFirstFrame below).
+            state.eisPreviewLive = false
             val pipeline = EisPipeline(context, state.caps.perfTier)
             eisPipeline = pipeline
             eisFacing = state.facingFront
@@ -859,11 +867,16 @@ private fun CameraScreenContent() {
                     pipeline.setTorch(state.videoTorch)
                 }
 
+                override fun onFirstFrame() {
+                    state.eisPreviewLive = true
+                }
+
                 override fun onFailed(reason: String) {
                     state.eisActive = false
+                    state.eisPreviewLive = false
                     state.eisFailed = true
                     state.toast =
-                        "EIS software tidak dapat jalan — memakai stabilisasi/rekam bawaan"
+                        "Stabilisasi software tidak berjalan di perangkat ini — rekam biasa"
                 }
 
                 override fun onRecordingSaved(uri: Uri) {
@@ -883,7 +896,23 @@ private fun CameraScreenContent() {
                 eisPipeline = null
             }
             state.eisActive = false
+            state.eisPreviewLive = false
+            // A parked shutter tap belongs to the run that just ended —
+            // unless this exit IS the failure fallback, whose resolver
+            // effects still need it to start the plain recording.
+            if (!state.eisFailed) {
+                pendingEisRecord = false
+                pendingFallbackRecord = false
+            }
         }
+    }
+
+    // fix8: turning ACTION or the EIS toggle off re-arms the pipeline.
+    // The failure latch holds only while the user keeps ACTION on (so a
+    // dead pipeline never loops start/fail), but one transient failure no
+    // longer disables EIS for the rest of the session.
+    LaunchedEffect(state.actionOn, state.eisEnabled) {
+        if (!state.actionOn || !state.eisEnabled) state.eisFailed = false
     }
 
     // Parked-tap resolvers (see pendingEisRecord / pendingFallbackRecord):
@@ -1092,10 +1121,13 @@ private fun CameraScreenContent() {
         state.focusNonce += 1
         exposureAcc = 0f
         if (state.eisActive) {
-            // Real AF/AE metering regions in the EIS pipeline's Camera2 session.
+            // Real AF/AE metering regions in the EIS pipeline's Camera2
+            // session. Normalise by the GL surface's own pixel size (the
+            // tap offsets are in layout px of the preview area, which the
+            // surface fills) — the physical screen size skewed the region.
             eisPipeline?.tapToFocus(
-                off.x / screenSizePx.first.coerceAtLeast(1),
-                off.y / screenSizePx.second.coerceAtLeast(1)
+                off.x / eisSurfaceSize.first.coerceAtLeast(1),
+                off.y / eisSurfaceSize.second.coerceAtLeast(1)
             )
             return
         }
@@ -1165,6 +1197,11 @@ private fun CameraScreenContent() {
             if (eisWanted || state.eisActive) {
                 // ACTION gyro-EIS: the GL pipeline's own preview surface;
                 // the warped (stabilized) output shows before recording.
+                // fix8 handover: this surface sits UNDER the CameraX
+                // preview until the pipeline has actually presented frames
+                // (state.eisPreviewLive). The viewfinder is never handed
+                // to a pipeline that has not produced an image — and on
+                // failure the CameraX preview simply never left.
                 AndroidView(
                     factory = { ctx ->
                         SurfaceView(ctx).apply {
@@ -1194,7 +1231,8 @@ private fun CameraScreenContent() {
                     },
                     modifier = Modifier.fillMaxSize()
                 )
-            } else {
+            }
+            if (!state.eisPreviewLive) {
                 AndroidView(
                     factory = { ctx ->
                         PreviewView(ctx).apply {

@@ -593,6 +593,32 @@ private fun PanoGuide(state: CameraState, actions: CameraActions) {
  * Drag horizontally on the pill to rotate modes; tap a neighbour to jump.
  * Modes this device cannot really run are dimmed and cannot be selected.
  */
+/**
+ * fix8 — the ONE carousel settle rule, shared by the pill drag below and
+ * the preview swipe (CameraScreen.swipeMode): the index exactly one hop
+ * from [from] in [dir] that names an AVAILABLE mode (unavailable modes
+ * are skipped, never landed on), or [from] itself when no available mode
+ * lies that way. A released gesture can therefore never overshoot by a
+ * mode, and both gesture paths always agree.
+ */
+internal fun nextAvailableModeIndex(
+    modes: List<CamMode>,
+    from: Int,
+    dir: Int,
+    available: (CamMode) -> Boolean
+): Int {
+    var i = from + dir
+    while (i in modes.indices) {
+        if (available(modes[i])) return i
+        i += dir
+    }
+    return from
+}
+
+/** The single spring every carousel settle uses (base slide + drag return). */
+private val CarouselSettleSpec: SpringSpec<Float> =
+    spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMediumLow)
+
 @Composable
 private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
     val modes = remember { CamMode.values().toList() }
@@ -627,16 +653,18 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
     val baseTarget = -centersPx[selectedIdx]
     val baseAnim by animateFloatAsState(
         targetValue = baseTarget,
-        animationSpec = spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMediumLow),
+        animationSpec = CarouselSettleSpec,
         label = "carouselBase"
     )
 
     fun settleDrag() {
         val drag = state.carouselDragPx
-        // Snap by WHERE THE STRIP RESTS, not a one-step threshold: the
-        // drag distance in label-pitch units decides the target index,
-        // symmetrically in both directions (the old single-step logic
-        // could refuse PHOTO when coming from VIDEO and spring back).
+        // fix8: settle by the shared one-hop rule (nextAvailableModeIndex,
+        // also used by the preview swipe). The old pitch-count math let a
+        // firm flick jump TWO modes (beta device: PORTRAIT -> PHOTO landed
+        // on VIDEO), and around unavailable modes its walk-back branch
+        // moved the base target against the drag spring — the SLO-MO /
+        // TIME-LAPSE "mental-mental".
         val pitchPx = if (centersPx.size > 1) {
             (centersPx.last() - centersPx.first()) / (centersPx.size - 1)
         } else {
@@ -645,28 +673,16 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
         val steps = (-drag / pitchPx).roundToInt()
         if (steps != 0) {
             val dir = if (steps > 0) 1 else -1
-            var i = (selectedIdx + steps).coerceIn(modes.indices)
-            // Land on the nearest runnable mode in the drag direction.
-            while (i in modes.indices && !state.modeAvailable(modes[i])) {
-                i += dir
+            val target = nextAvailableModeIndex(modes, selectedIdx, dir) {
+                state.modeAvailable(it)
             }
-            if (i in modes.indices && i != selectedIdx) {
-                actions.onModeSelect(modes[i])
-            } else if (i !in modes.indices) {
-                // Overshot past an unavailable end mode: walk back inward.
-                var j = (selectedIdx + steps).coerceIn(modes.indices)
-                while (j in modes.indices && !state.modeAvailable(modes[j])) {
-                    j -= dir
-                }
-                if (j in modes.indices && j != selectedIdx) {
-                    actions.onModeSelect(modes[j])
-                }
-            }
+            if (target != selectedIdx) actions.onModeSelect(modes[target])
         }
+        // One settle spring (same spec as the base slide) returns the drag
+        // offset to rest — no second animation fighting the landing.
         scope.launch {
             Animatable(state.carouselDragPx).animateTo(
-                0f,
-                spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMediumLow)
+                0f, CarouselSettleSpec
             ) { state.carouselDragPx = this.value }
         }
     }
@@ -935,8 +951,20 @@ private fun Sheet26(state: CameraState, actions: CameraActions, modifier: Modifi
                 .background(GlassPanelBrush)
                 .border(1.dp, GlassRim, RoundedCornerShape(34.dp))
                 .pointerInput(Unit) {
-                    detectVerticalDragGestures { _, dragAmount ->
-                        if (dragAmount > 42f) actions.onCloseSheet()
+                    // Swipe-down-to-close must accumulate: a single move
+                    // event's delta is only a few px, so the old
+                    // per-event threshold almost never fired.
+                    var dragTotal = 0f
+                    detectVerticalDragGestures(
+                        onDragStart = { dragTotal = 0f },
+                        onDragEnd = { dragTotal = 0f },
+                        onDragCancel = { dragTotal = 0f }
+                    ) { _, dragAmount ->
+                        dragTotal += dragAmount
+                        if (dragTotal > 90f) {
+                            dragTotal = 0f
+                            actions.onCloseSheet()
+                        }
                     }
                 }
                 .padding(vertical = 14.dp)
@@ -1074,74 +1102,59 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
         else -> Unit
     }
 
-    items.chunked(3).forEach { rowItems ->
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            rowItems.forEach { item ->
-                ControlButton(item.label, item.active, item.onClick, item.glyph, item.enabled)
-            }
-            repeat(3 - rowItems.size) { Spacer(Modifier.width(86.dp)) }
-        }
-        Spacer(Modifier.height(8.dp))
-    }
+    // fix8: Pengaturan & Grid are tiles in the SAME grid, same glass
+    // circles as FLASH/EXPOSURE/ACTION (the iPhone sheet does exactly
+    // this). The old footer row — small gear + "Pengaturan & Info" text
+    // on the left, Grid label on the right, under a divider — collided
+    // with the FLASH/ACTION tiles on the narrow beta device. There is no
+    // header/footer row left to collide with anything.
+    items += SheetItem("PENGATURAN", false,
+        {
+            actions.onCloseSheet()
+            state.settingsOpen = true
+        }) { c -> GearGlyph(c, Modifier.size(28.dp)) }
+    items += SheetItem("GRID", state.gridOn,
+        { actions.onToggleGrid() }) { c -> GridGlyph(c, Modifier.size(28.dp)) }
 
-    // PORTRAIT extras (reference sheet): NATURAL LIGHT chip + the lighting
-    // control simplified to the one control that is real here — the ƒ slider,
-    // which literally sets the segmentation blur strength.
-    if (state.mode == CamMode.PORTRAIT &&
-        state.extensionMode != androidx.camera.extensions.ExtensionMode.BOKEH
-    ) {
-        Box(
-            Modifier.fillMaxWidth().padding(horizontal = 18.dp)
-                .height(1.dp).background(Color.White.copy(alpha = 0.10f))
-        )
-        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 10.dp)) {
-            Text(
-                "Intensitas blur latar",
-                color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp
-            )
+    // ONE root inside the AnimatedContent slot: AnimatedContent stacks
+    // multiple emitted roots on top of each other, so emitting the grid
+    // rows directly made every row render at the SAME position — tiles,
+    // labels and the old footer all overlapping (the beta device photo,
+    // and visible in the old screenshot goldens too). The bottom padding
+    // keeps the last row's labels clear of the card edge.
+    Column(Modifier.padding(bottom = 10.dp)) {
+        items.chunked(3).forEach { rowItems ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                rowItems.forEach { item ->
+                    ControlButton(item.label, item.active, item.onClick, item.glyph, item.enabled)
+                }
+                repeat(3 - rowItems.size) { Spacer(Modifier.width(86.dp)) }
+            }
             Spacer(Modifier.height(8.dp))
-            ApertureSlider(state)
         }
-    }
 
-    // Footer: Settings & Info door + grid toggle.
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 18.dp)
-            .height(1.dp)
-            .background(Color.White.copy(alpha = 0.10f))
-    )
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.clickable {
-                actions.onCloseSheet()
-                state.settingsOpen = true
-            }
+        // PORTRAIT extras (reference sheet): NATURAL LIGHT chip + the
+        // lighting control simplified to the one control that is real
+        // here — the ƒ slider, which literally sets the segmentation
+        // blur strength.
+        if (state.mode == CamMode.PORTRAIT &&
+            state.extensionMode != androidx.camera.extensions.ExtensionMode.BOKEH
         ) {
-            GearGlyph(Color.White, Modifier.size(15.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("Pengaturan & Info", color = Color.White, fontSize = 11.sp)
-        }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.clickable { actions.onToggleGrid() }
-        ) {
-            GridGlyph(if (state.gridOn) IosYellow else Color.White, Modifier.size(20.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(
-                "Grid",
-                color = if (state.gridOn) IosYellow else Color.White,
-                fontSize = 12.sp
+            Box(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp)
+                    .height(1.dp).background(Color.White.copy(alpha = 0.10f))
             )
+            Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 10.dp)) {
+                Text(
+                    "Intensitas blur latar",
+                    color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp
+                )
+                Spacer(Modifier.height(8.dp))
+                ApertureSlider(state)
+            }
         }
     }
 }

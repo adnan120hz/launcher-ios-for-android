@@ -22,7 +22,7 @@ object UpdateChecker {
 
     /**
      * Returns the newest camera release when it is strictly newer than
-     * [currentVersion] (e.g. "0.5.0"), else null. Never throws.
+     * [currentVersion] (e.g. "1.0.0"), else null. Never throws.
      */
     fun check(context: Context, currentVersion: String): Result? {
         return try {

@@ -208,6 +208,11 @@ class CameraState(context: Context) {
     var eisActive by mutableStateOf(false)
     /** Runtime latch: the pipeline failed on this device -> hw/plain fallback. */
     var eisFailed by mutableStateOf(false)
+    /** Runtime: the EIS GL preview has actually presented frames, so the UI
+     *  may swap the CameraX preview out for the GL surface. Until the first
+     *  frame lands, the CameraX preview stays composed (never a black
+     *  viewfinder while the pipeline spins up or fails). */
+    var eisPreviewLive by mutableStateOf(false)
 
     /** True while ACTION-EIS records a >1080p selection at its 1080p cap. */
     val eisCapped: Boolean
