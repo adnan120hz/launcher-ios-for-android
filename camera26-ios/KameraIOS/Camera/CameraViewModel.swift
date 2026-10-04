@@ -573,9 +573,9 @@ final class CameraViewModel: ObservableObject {
         VideoTools.assembleTimeLapse(images: frames) { url in
             if let url {
                 PhotoSaver.saveVideo(url) { _ in }
-                showBanner("TIME-LAPSE SELESAI")
+                self.showBanner("TIME-LAPSE SELESAI")
             } else {
-                showToast("Time-lapse gagal dirangkai — coba lagi.")
+                self.showToast("Time-lapse gagal dirangkai — coba lagi.")
             }
         }
     }

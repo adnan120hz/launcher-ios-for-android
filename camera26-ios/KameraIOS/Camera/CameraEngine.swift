@@ -41,7 +41,7 @@ final class CameraEngine: NSObject {
     private(set) var baseFocalMM: Double = 24
     var stabilizationMode: AVCaptureVideoStabilizationMode = .auto
 
-    private var photoCompletions: [Int64: (AVCapturePhoto?, Error?)] = [:]
+    private var photoCompletions: [Int64: (AVCapturePhoto?, Error?) -> Void] = [:]
     private var recordCompletion: ((URL?, Error?) -> Void)?
     private var movieOutputAttached = false
     private var audioInput: AVCaptureDeviceInput?
