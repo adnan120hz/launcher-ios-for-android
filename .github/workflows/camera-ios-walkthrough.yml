@@ -111,9 +111,10 @@ jobs:
                       return None
                   dt = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f")
                   return dt.timestamp()
-              suite_start = ts(r"Test Suite 'All tests' started at ([\d\- :.]+)")
+              stamp = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)"
+              suite_start = ts(r"Test Suite 'All tests' started at " + stamp)
               suite_end = None
-              for m in re.finditer(r"Test Suite 'All tests' (?:passed|failed) at ([\d\- :.]+)", log):
+              for m in re.finditer(r"Test Suite 'All tests' (?:passed|failed) at " + stamp, log):
                   suite_end = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").timestamp()
               if suite_start is None:
                   raise ValueError("suite start not found in log")

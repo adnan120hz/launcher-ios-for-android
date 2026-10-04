@@ -60,7 +60,8 @@ final class CameraEngine: NSObject {
         let center = NotificationCenter.default
         notificationTokens.append(center.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: .main) { [weak self] note in
             let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
-            let reason = error?.localizedDescription ?? "Sesi kamera berhenti karena kesalahan sistem."
+            let reason = error.map { "\($0.localizedDescription) (\($0.domain) \($0.code))" }
+                ?? "Sesi kamera berhenti karena kesalahan sistem."
             self?.onRuntimeError?(reason)
         })
         notificationTokens.append(center.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: .main) { [weak self] _ in
@@ -110,12 +111,18 @@ final class CameraEngine: NSObject {
             session.addOutput(photoOutput)
         }
         photoOutput.maxPhotoQualityPrioritization = .quality
+        // Depth / portrait-matte delivery are real-device capture
+        // features; the Simulator's virtual camera advertises support
+        // but fails the whole session at startRunning (runtime error),
+        // so they are only ever enabled on physical hardware.
+        #if !targetEnvironment(simulator)
         if photoOutput.isDepthDataDeliverySupported {
             photoOutput.isDepthDataDeliveryEnabled = true
         }
         if photoOutput.isPortraitEffectsMatteDeliverySupported {
             photoOutput.isPortraitEffectsMatteDeliveryEnabled = true
         }
+        #endif
         refreshCapabilities(for: dev)
         return true
     }
