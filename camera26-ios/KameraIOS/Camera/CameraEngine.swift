@@ -21,9 +21,6 @@ struct CameraCapabilities {
     var minZoom: Double = 1
     var maxZoom: Double = 1
     var zoomStops: [Double] = [1]
-    var sloMoRates: [Int] = []            // e.g. [120, 240]
-    var cinematicSupported = false
-    var portraitSupported = false         // depth and/or portrait matte
     var videoFormats: [VideoFormatOption] = []
     var hasTorch = false
 }
@@ -47,6 +44,8 @@ final class CameraEngine: NSObject {
     private var photoCompletion: ((AVCapturePhoto?, Error?) -> Void)?
     private var recordCompletion: ((URL?, Error?) -> Void)?
     private var movieOutputAttached = false
+    private var audioInput: AVCaptureDeviceInput?
+    private var audioInputAttached = false
     private var notificationTokens: [NSObjectProtocol] = []
 
     /// Called (on the main queue) when the capture session itself fails
@@ -87,6 +86,12 @@ final class CameraEngine: NSObject {
         self.position = position
         session.beginConfiguration()
         defer { session.commitConfiguration() }
+
+        // We drive the device format ourselves (resolution/fps picker), so
+        // the session must not override it with a preset.
+        if session.sessionPreset != .inputPriority {
+            session.sessionPreset = .inputPriority
+        }
 
         if let old = input {
             session.removeInput(old)
@@ -159,17 +164,10 @@ final class CameraEngine: NSObject {
         if caps.maxZoom > 2 { stops.append(min(8, caps.maxZoom)) }
         caps.zoomStops = Array(Set(stops)).sorted()
 
-        var slo: Set<Int> = []
-        var cinematic = false
         var buckets: [String: (label: String, w: Int, h: Int, format: AVCaptureDevice.Format, fps: Set<Int>)] = [:]
         for format in dev.formats {
             let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             let maxFps = format.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 30
-            if maxFps >= 119 { slo.insert(Int(maxFps.rounded())) }
-            if format.isVideoStabilizationModeSupported(.cinematic) ||
-                format.isVideoStabilizationModeSupported(.cinematicExtended) {
-                cinematic = true
-            }
             // Bucket recording formats by resolution (landscape sizes).
             let w = Int(max(dims.width, dims.height))
             let h = Int(min(dims.width, dims.height))
@@ -193,9 +191,6 @@ final class CameraEngine: NSObject {
                 buckets[key] = (label, w, h, format, fpsSet)
             }
         }
-        caps.sloMoRates = slo.sorted()
-        caps.cinematicSupported = cinematic
-        caps.portraitSupported = photoOutput.isDepthDataDeliverySupported || photoOutput.isPortraitEffectsMatteDeliverySupported
         caps.videoFormats = buckets.values
             .map { VideoFormatOption(id: "\($0.label)-\($0.w)x\($0.h)", label: $0.label, width: $0.w, height: $0.h,
                                      fpsOptions: $0.fps.sorted(), format: $0.format) }
@@ -219,9 +214,17 @@ final class CameraEngine: NSObject {
     // MARK: - Mode / outputs
 
     /// Attach or detach the movie output depending on the mode family.
+    /// The microphone input rides along with it: it is added only when
+    /// microphone access is already granted (the view model asks, in the
+    /// context of recording video — never at launch), so the session never
+    /// touches the mic uninvited. Without permission the movie output
+    /// simply records video-only and the UI says so.
     func setVideoOutputAttached(_ attached: Bool) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            if !attached, self.movieOutput.isRecording {
+                self.movieOutput.stopRecording()
+            }
             self.session.beginConfiguration()
             if attached, !self.movieOutputAttached, self.session.canAddOutput(self.movieOutput) {
                 self.session.addOutput(self.movieOutput)
@@ -230,9 +233,51 @@ final class CameraEngine: NSObject {
                 self.session.removeOutput(self.movieOutput)
                 self.movieOutputAttached = false
             }
+            if attached {
+                self.attachAudioInputIfPermitted()
+            } else {
+                self.detachAudioInput()
+            }
             self.session.commitConfiguration()
             if attached { self.applyStabilization() }
         }
+    }
+
+    /// Adds the built-in microphone as a session input so recordings carry
+    /// sound. Honest gates: permission granted, movie output attached, an
+    /// actual microphone exists, and the session accepts the input — any
+    /// failure just leaves video-only recording.
+    func setAudioInputAttached(_ attached: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.session.beginConfiguration()
+            if attached {
+                self.attachAudioInputIfPermitted()
+            } else {
+                self.detachAudioInput()
+            }
+            self.session.commitConfiguration()
+        }
+    }
+
+    private func attachAudioInputIfPermitted() {
+        guard movieOutputAttached, !audioInputAttached,
+              AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInMicrophone], mediaType: .audio, position: .unspecified)
+        guard let mic = discovery.devices.first,
+              let micInput = try? AVCaptureDeviceInput(device: mic),
+              session.canAddInput(micInput) else { return }
+        session.addInput(micInput)
+        audioInput = micInput
+        audioInputAttached = true
+    }
+
+    private func detachAudioInput() {
+        guard audioInputAttached, let micInput = audioInput else { return }
+        session.removeInput(micInput)
+        audioInput = nil
+        audioInputAttached = false
     }
 
     // MARK: - Video format / fps / stabilization
@@ -242,7 +287,11 @@ final class CameraEngine: NSObject {
             guard let self, let dev = self.device else { return }
             do {
                 try dev.lockForConfiguration()
-                dev.activeFormat = option.format
+                // Only ever assign a format that belongs to the active
+                // device (after a camera flip the list is re-picked first).
+                if dev.formats.contains(option.format) {
+                    dev.activeFormat = option.format
+                }
                 let dur = CMTime(value: 1, timescale: CMTimeScale(fps))
                 if dev.activeFormat.videoSupportedFrameRateRanges.contains(where: { Double(fps) >= $0.minFrameRate && Double(fps) <= $0.maxFrameRate }) {
                     dev.activeVideoMinFrameDuration = dur
@@ -260,20 +309,31 @@ final class CameraEngine: NSObject {
     }
 
     /// ACTION mode: use the strongest stabilization the active format
-    /// honestly supports; the UI labels the actual source.
+    /// honestly supports, never asking the connection for a mode the
+    /// format did not report. The UI labels the actual choice.
     func applyStabilization() {
         guard movieOutputAttached,
               let connection = movieOutput.connection(with: .video),
               connection.isVideoStabilizationSupported else { return }
         let format = device?.activeFormat
+        func isSupported(_ candidate: AVCaptureVideoStabilizationMode) -> Bool {
+            candidate == .off || format?.isVideoStabilizationModeSupported(candidate) == true
+        }
+        // Strength order, strongest first.
+        let strength: [AVCaptureVideoStabilizationMode] = [.cinematicExtended, .cinematic, .standard, .auto]
         let mode: AVCaptureVideoStabilizationMode
         switch stabilizationMode {
-        case .cinematicExtended where format?.isVideoStabilizationModeSupported(.cinematicExtended) == true:
-            mode = .cinematicExtended
-        case .cinematic where format?.isVideoStabilizationModeSupported(.cinematic) == true:
-            mode = .cinematic
+        case .off:
+            mode = .off
+        case .auto:
+            mode = isSupported(.auto) ? .auto : .off
         default:
-            mode = stabilizationMode
+            if let idx = strength.firstIndex(of: stabilizationMode),
+               let best = strength[idx...].first(where: isSupported) {
+                mode = best
+            } else {
+                mode = isSupported(stabilizationMode) ? stabilizationMode : .off
+            }
         }
         connection.preferredVideoStabilizationMode = mode
     }
@@ -283,99 +343,76 @@ final class CameraEngine: NSObject {
               let connection = movieOutput.connection(with: .video),
               connection.isVideoStabilizationSupported else { return "Tidak tersedia di perangkat ini" }
         switch connection.preferredVideoStabilizationMode {
-        case .cinematicExtended: return "Stabilisasi sinematik diperluas (AVFoundation)"
-        case .cinematic: return "Stabilisasi sinematik (AVFoundation)"
+        case .cinematicExtended: return "Stabilisasi diperluas (AVFoundation)"
+        case .cinematic: return "Stabilisasi kuat (AVFoundation)"
         case .standard: return "Stabilisasi standar (AVFoundation)"
         case .auto: return "Stabilisasi otomatis (AVFoundation)"
         default: return "Nonaktif"
         }
     }
 
-    /// Selects a format that truly records at `rate` fps (SLO-MO).
-    /// Prefers a 1080p-class format; returns false when the device has no
-    /// high-speed format at all (UI keeps SLO-MO dimmed then).
-    @discardableResult
-    func applyHighSpeedFormat(rate: Int) -> Bool {
-        guard let dev = device else { return false }
-        let supporting = dev.formats.filter { format in
-            format.videoSupportedFrameRateRanges.contains {
-                Double(rate) >= $0.minFrameRate && Double(rate) <= $0.maxFrameRate
-            }
-        }
-        guard !supporting.isEmpty else { return false }
-        let chosen = supporting.first { CMVideoFormatDescriptionGetDimensions($0.formatDescription).width == 1920 }
-            ?? supporting.min { a, b in
-                let wa = CMVideoFormatDescriptionGetDimensions(a.formatDescription).width
-                let wb = CMVideoFormatDescriptionGetDimensions(b.formatDescription).width
-                return abs(Int(wa) - 1920) < abs(Int(wb) - 1920)
-            }
-            ?? supporting[0]
-        do {
-            try dev.lockForConfiguration()
-            dev.activeFormat = chosen
-            let dur = CMTime(value: 1, timescale: CMTimeScale(rate))
-            dev.activeVideoMinFrameDuration = dur
-            dev.activeVideoMaxFrameDuration = dur
-            dev.unlockForConfiguration()
-            updateBaseFocal()
-            return true
-        } catch { return false }
-    }
-
     var lowLightBoostSupported: Bool { device?.isLowLightBoostSupported ?? false }
 
     func setLowLightBoost(_ on: Bool) {
-        guard let dev = device, dev.isLowLightBoostSupported else { return }
-        do {
-            try dev.lockForConfiguration()
-            // `isLowLightBoostEnabled` is get-only; the settable switch is
-            // the automatic boost (verified against the SDK in CI).
-            dev.automaticallyEnablesLowLightBoostWhenAvailable = on
-            dev.unlockForConfiguration()
-        } catch { /* ignore */ }
+        sessionQueue.async { [weak self] in
+            guard let self, let dev = self.device, dev.isLowLightBoostSupported else { return }
+            do {
+                try dev.lockForConfiguration()
+                // `isLowLightBoostEnabled` is get-only; the settable switch is
+                // the automatic boost (verified against the SDK in CI).
+                dev.automaticallyEnablesLowLightBoostWhenAvailable = on
+                dev.unlockForConfiguration()
+            } catch { /* ignore */ }
+        }
     }
 
     // MARK: - Zoom
 
     func setZoom(ratio: Double, animated: Bool) {
-        guard let dev = device else { return }
-        let clamped = min(max(ratio, Double(dev.minAvailableVideoZoomFactor)), Double(dev.maxAvailableVideoZoomFactor))
-        do {
-            try dev.lockForConfiguration()
-            if animated {
-                dev.cancelVideoZoomRamp()
-                dev.ramp(toVideoZoomFactor: CGFloat(clamped), withRate: 6.0)
-            } else {
-                dev.videoZoomFactor = CGFloat(clamped)
-            }
-            dev.unlockForConfiguration()
-        } catch { /* ignore */ }
+        sessionQueue.async { [weak self] in
+            guard let self, let dev = self.device else { return }
+            let clamped = min(max(ratio, Double(dev.minAvailableVideoZoomFactor)), Double(dev.maxAvailableVideoZoomFactor))
+            do {
+                try dev.lockForConfiguration()
+                if animated {
+                    dev.cancelVideoZoomRamp()
+                    dev.ramp(toVideoZoomFactor: CGFloat(clamped), withRate: 6.0)
+                } else {
+                    dev.videoZoomFactor = CGFloat(clamped)
+                }
+                dev.unlockForConfiguration()
+            } catch { /* ignore */ }
+        }
     }
 
     // MARK: - Focus / exposure / torch / flash
 
     func focus(at devicePoint: CGPoint, exposureBias: Float) {
-        guard let dev = device else { return }
-        do {
-            try dev.lockForConfiguration()
-            if dev.isFocusPointOfInterestSupported {
-                dev.focusPointOfInterest = devicePoint
-                dev.focusMode = .autoFocus
-            }
-            if dev.isExposurePointOfInterestSupported {
-                dev.exposurePointOfInterest = devicePoint
-                dev.exposureMode = .autoExpose
-            }
-            let clamped = min(max(exposureBias, dev.minExposureTargetBias), dev.maxExposureTargetBias)
-            dev.setExposureTargetBias(clamped, completionHandler: nil)
-            dev.unlockForConfiguration()
-        } catch { /* ignore */ }
+        sessionQueue.async { [weak self] in
+            guard let self, let dev = self.device else { return }
+            do {
+                try dev.lockForConfiguration()
+                if dev.isFocusPointOfInterestSupported {
+                    dev.focusPointOfInterest = devicePoint
+                    dev.focusMode = .autoFocus
+                }
+                if dev.isExposurePointOfInterestSupported {
+                    dev.exposurePointOfInterest = devicePoint
+                    dev.exposureMode = .autoExpose
+                }
+                let clamped = min(max(exposureBias, dev.minExposureTargetBias), dev.maxExposureTargetBias)
+                dev.setExposureTargetBias(clamped, completionHandler: nil)
+                dev.unlockForConfiguration()
+            } catch { /* ignore */ }
+        }
     }
 
     func setExposureBias(_ bias: Float) {
-        guard let dev = device else { return }
-        let clamped = min(max(bias, dev.minExposureTargetBias), dev.maxExposureTargetBias)
-        dev.setExposureTargetBias(clamped, completionHandler: nil)
+        sessionQueue.async { [weak self] in
+            guard let self, let dev = self.device else { return }
+            let clamped = min(max(bias, dev.minExposureTargetBias), dev.maxExposureTargetBias)
+            dev.setExposureTargetBias(clamped, completionHandler: nil)
+        }
     }
 
     var exposureBiasRange: ClosedRange<Float> {
@@ -384,12 +421,14 @@ final class CameraEngine: NSObject {
     }
 
     func setTorch(_ on: Bool) {
-        guard let dev = device, dev.hasTorch else { return }
-        do {
-            try dev.lockForConfiguration()
-            dev.torchMode = on ? .on : .off
-            dev.unlockForConfiguration()
-        } catch { /* ignore */ }
+        sessionQueue.async { [weak self] in
+            guard let self, let dev = self.device, dev.hasTorch else { return }
+            do {
+                try dev.lockForConfiguration()
+                dev.torchMode = on ? .on : .off
+                dev.unlockForConfiguration()
+            } catch { /* ignore */ }
+        }
     }
 
     // MARK: - Photo

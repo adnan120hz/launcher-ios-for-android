@@ -22,8 +22,11 @@ enum GlassStyle {
 }
 
 /// Translucent glass background for pills/panels with a fully rounded shape.
+/// Deliberately calm: a system blur material plus a whisper of top light —
+/// no stacked specular gradients, so the preview stays the brightest thing
+/// on screen and the layer cost stays at one material.
 struct GlassCapsuleBackground: View {
-    var tint: Color = .black.opacity(0.28)
+    var tint: Color = .black.opacity(0.22)
 
     var body: some View {
         if #available(iOS 26.0, *) {
@@ -36,12 +39,12 @@ struct GlassCapsuleBackground: View {
                 .overlay(
                     Capsule().fill(
                         LinearGradient(
-                            colors: [Color.white.opacity(0.20), Color.white.opacity(0.03), Color.black.opacity(0.10)],
+                            colors: [Color.white.opacity(0.10), Color.white.opacity(0.02), Color.black.opacity(0.05)],
                             startPoint: .top, endPoint: .bottom
                         )
                     )
                 )
-                .overlay(Capsule().stroke(Color.white.opacity(0.35), lineWidth: 1))
+                .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
         }
     }
 }
@@ -49,7 +52,7 @@ struct GlassCapsuleBackground: View {
 /// Same idea for rounded-rectangle panels (sheets, cards).
 struct GlassPanelBackground: View {
     var cornerRadius: CGFloat = 28
-    var tint: Color = .black.opacity(0.30)
+    var tint: Color = .black.opacity(0.26)
 
     var body: some View {
         if #available(iOS 26.0, *) {
@@ -62,45 +65,38 @@ struct GlassPanelBackground: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).fill(
                         LinearGradient(
-                            colors: [Color.white.opacity(0.16), Color.white.opacity(0.02), Color.black.opacity(0.12)],
+                            colors: [Color.white.opacity(0.09), Color.white.opacity(0.01), Color.black.opacity(0.06)],
                             startPoint: .top, endPoint: .bottom
                         )
                     )
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(Color.white.opacity(0.30), lineWidth: 1)
+                        .stroke(Color.white.opacity(0.20), lineWidth: 1)
                 )
         }
     }
 }
 
 /// The selected-mode capsule in the carousel: a glass bubble that swells
-/// like jelly while pressed/dragged and springs back on release — the
-/// same behaviour the Android app ships. `squash` is -1...1 (drag
-/// velocity direction), `active` is true while a finger is down.
+/// gently like jelly while pressed/dragged and springs back on release —
+/// the same behaviour the Android app ships, kept visually quiet (one
+/// glass layer, one soft rim, no specular stack). `squash` is -1...1
+/// (drag velocity direction), `active` is true while a finger is down.
 struct GlassBubble: View {
     var active: Bool
     var squash: CGFloat
 
     var body: some View {
-        let scaleX = active ? 1.14 + abs(squash) * 0.10 : 1.0
-        let scaleY = active ? 1.10 - abs(squash) * 0.04 : 1.0
-        ZStack {
-            GlassCapsuleBackground(tint: .white.opacity(0.10))
-            Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [Color.white.opacity(active ? 0.38 : 0.22), Color.white.opacity(0.05)],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
-            Capsule()
-                .stroke(Color.white.opacity(active ? 0.75 : 0.45), lineWidth: 1)
-                .blur(radius: 0.4)
-        }
-        .scaleEffect(x: scaleX, y: scaleY)
-        .animation(.spring(response: 0.32, dampingFraction: 0.42), value: active)
-        .animation(.spring(response: 0.32, dampingFraction: 0.42), value: squash)
+        let scaleX = active ? 1.08 + abs(squash) * 0.06 : 1.0
+        let scaleY = active ? 1.05 - abs(squash) * 0.03 : 1.0
+        GlassCapsuleBackground(tint: .white.opacity(0.08))
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(active ? 0.40 : 0.26), lineWidth: 1)
+            )
+            .scaleEffect(x: scaleX, y: scaleY)
+            .animation(.spring(response: 0.32, dampingFraction: 0.42), value: active)
+            .animation(.spring(response: 0.32, dampingFraction: 0.42), value: squash)
     }
 }

@@ -60,7 +60,6 @@ final class CameraViewModel: ObservableObject {
     @Published var stabSourceLabel = ""
     @Published var selectedFormat: VideoFormatOption? = nil
     @Published var fps = 30
-    @Published var sloMoRate = 120
 
     // Zoom
     @Published var zoomRatio: Double = 1
@@ -96,7 +95,6 @@ final class CameraViewModel: ObservableObject {
     @Published var updateTag: String? = nil
     @Published var updateURL: String? = nil
 
-    private var cinematicNoticeShown = false
     private var recordTimer: Timer?
     private var zoomPollTimer: Timer?
     private var timelapseTimer: Timer?
@@ -275,23 +273,15 @@ final class CameraViewModel: ObservableObject {
     // MARK: - Mode availability & selection
 
     func modeAvailable(_ m: CameraMode) -> Bool {
-        guard isReady else { return m == .photo || m == .video }
-        switch m {
-        case .photo, .video, .portrait, .pano, .timeLapse: return true
-        case .sloMo: return !caps.sloMoRates.isEmpty
-        case .cinematic: return caps.cinematicSupported
-        }
+        // All five remaining modes run on every device (photo-output based
+        // modes need nothing exotic; VIDEO uses the movie output). Nothing
+        // is listed that the engine cannot actually do.
+        return true
     }
 
     func selectMode(_ m: CameraMode) {
         guard m != mode else { return }
-        guard modeAvailable(m) else {
-            if m == .cinematic, !cinematicNoticeShown {
-                cinematicNoticeShown = true
-                showToast("CINEMATIC hanya tersedia di perangkat yang mendukung mode sinematik Apple.")
-            }
-            return
-        }
+        guard modeAvailable(m) else { return }
         // Leaving a running activity cleanly.
         if isRecording { stopVideoRecording() }
         if timelapseRunning { stopTimelapse() }
@@ -299,11 +289,10 @@ final class CameraViewModel: ObservableObject {
         mode = m
         sheet = .none
         dialVisible = false
-        engine.setVideoOutputAttached(m == .video || m == .sloMo || m == .cinematic)
-        switch m {
-        case .video, .cinematic: applyVideoSettings()
-        case .sloMo: applySloMoSettings()
-        default: break
+        engine.setVideoOutputAttached(m == .video)
+        if m == .video {
+            applyVideoSettings()
+            ensureMicrophoneForVideo()
         }
     }
 
@@ -312,10 +301,16 @@ final class CameraViewModel: ObservableObject {
         facingFront.toggle()
         engine.configure(position: facingFront ? .front : .back) { [weak self] ok in
             guard let self, ok else { return }
-            self.engine.setVideoOutputAttached(self.mode == .video || self.mode == .sloMo || self.mode == .cinematic)
+            // Formats belong to a device: re-pick from the new camera's
+            // real list before anything applies the old pick to it.
+            self.selectedFormat = self.engine.capabilities.videoFormats.first { $0.label == "HD" }
+                ?? self.engine.capabilities.videoFormats.first
+            self.engine.setVideoOutputAttached(self.mode == .video)
             self.zoomRatio = 1
-            if self.mode == .video || self.mode == .cinematic { self.applyVideoSettings() }
-            if self.mode == .sloMo { self.applySloMoSettings() }
+            if self.mode == .video {
+                self.applyVideoSettings()
+                self.ensureMicrophoneForVideo()
+            }
         }
     }
 
@@ -329,9 +324,26 @@ final class CameraViewModel: ObservableObject {
         refreshStabLabel()
     }
 
-    private func applySloMoSettings() {
-        sloMoRate = caps.sloMoRates.max() ?? 120
-        engine.applyHighSpeedFormat(rate: sloMoRate)
+    /// Microphone, asked for in its real context — the user has just
+    /// entered VIDEO mode or is about to record — never at launch. If
+    /// access is refused, recording still works, only without sound, and
+    /// the toast says exactly that.
+    private func ensureMicrophoneForVideo() {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            engine.setAudioInputAttached(true)
+        case .notDetermined:
+            Permissions.requestMicrophone { [weak self] granted in
+                guard let self else { return }
+                if granted {
+                    self.engine.setAudioInputAttached(true)
+                } else {
+                    self.showToast("Mikrofon tidak diizinkan — video direkam tanpa suara.")
+                }
+            }
+        default:
+            showToast("Mikrofon mati — video direkam tanpa suara. Aktifkan di Pengaturan iOS bila ingin bersuara.")
+        }
     }
 
     func selectFormat(_ fmt: VideoFormatOption) {
@@ -389,8 +401,12 @@ final class CameraViewModel: ObservableObject {
     }
 
     func zoomByPinch(scale: CGFloat, baseRatio: Double) {
-        engine.setZoom(ratio: baseRatio * Double(scale), animated: false)
-        zoomRatio = engine.zoomRatio
+        let target = baseRatio * Double(scale)
+        engine.setZoom(ratio: target, animated: false)
+        // Engine mutations now land on the session queue, so publish the
+        // (clamped) target instead of reading the device back too early;
+        // the zoom poll keeps this honest while a ramp runs.
+        zoomRatio = min(max(target, caps.minZoom), caps.maxZoom)
     }
 
     // MARK: - Focus
@@ -414,7 +430,7 @@ final class CameraViewModel: ObservableObject {
         switch mode {
         case .photo, .portrait:
             runWithTimer { self.captureStill() }
-        case .video, .sloMo, .cinematic:
+        case .video:
             isRecording ? stopVideoRecording() : startVideoRecording()
         case .timeLapse:
             timelapseRunning ? stopTimelapse() : startTimelapse()
@@ -475,21 +491,17 @@ final class CameraViewModel: ObservableObject {
     // MARK: - Video recording
 
     private func startVideoRecording() {
+        // Permission was already requested on entering VIDEO; this just
+        // re-attaches if it was granted in the meantime (no-op otherwise,
+        // and the engine itself refuses without authorization).
+        engine.setAudioInputAttached(true)
         engine.startRecording { [weak self] url, _ in
             guard let self else { return }
             self.isRecording = false
             self.stopRecordTimer()
             guard let url else { return }
-            if self.mode == .sloMo {
-                VideoTools.makeSlowMotion(source: url, fromFps: self.sloMoRate) { slowed in
-                    let final = slowed ?? url
-                    PhotoSaver.saveVideo(final) { _ in }
-                    self.setVideoThumbnail(final)
-                }
-            } else {
-                PhotoSaver.saveVideo(url) { _ in }
-                self.setVideoThumbnail(url)
-            }
+            PhotoSaver.saveVideo(url) { _ in }
+            self.setVideoThumbnail(url)
         }
         isRecording = true
         recordingSeconds = 0

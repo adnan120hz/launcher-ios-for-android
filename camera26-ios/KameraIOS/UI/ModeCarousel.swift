@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// The mode pill under the shutter: TIME-LAPSE · SLO-MO · CINEMATIC ·
-/// VIDEO · PHOTO · PORTRAIT · PANO. Labels slide 1:1 with the finger, the
-/// glass capsule stays centred and swells like jelly while pressed, and
-/// settling moves at most one hop to the next *available* mode — the same
-/// rules the Android app settled on after device testing.
+/// The mode pill under the shutter: TIME-LAPSE · VIDEO · PHOTO ·
+/// PORTRAIT · PANO. Labels slide 1:1 with the finger, the glass capsule
+/// stays centred and swells like jelly while pressed, and settling moves
+/// at most one hop — PHOTO (the middle mode) is reachable from both
+/// directions, and nothing is ever skipped or landed on twice.
 struct ModeCarousel: View {
     @ObservedObject var vm: CameraViewModel
     private let slot: CGFloat = 84
@@ -15,7 +15,7 @@ struct ModeCarousel: View {
     var body: some View {
         GeometryReader { geo in
             let modes = CameraMode.allCases
-            let current = modes.firstIndex(of: vm.mode) ?? 4
+            let current = modes.firstIndex(of: vm.mode) ?? 2 // PHOTO is the middle mode
             ZStack {
                 GlassCapsuleBackground()
                 // Glass bubble behind the selected label.

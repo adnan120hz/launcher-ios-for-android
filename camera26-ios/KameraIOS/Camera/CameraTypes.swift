@@ -1,19 +1,17 @@
 import Foundation
 import AVFoundation
 
-/// The seven carousel modes, ordered exactly like the Android app
-/// (and the iOS Camera layout): TIME-LAPSE · SLO-MO · CINEMATIC · VIDEO ·
-/// PHOTO · PORTRAIT · PANO.
+/// The five carousel modes, ordered like the Android app:
+/// TIME-LAPSE · VIDEO · PHOTO · PORTRAIT · PANO. PHOTO sits in the
+/// middle, so the one-hop carousel settle reaches it from both sides.
 enum CameraMode: Int, CaseIterable, Identifiable {
-    case timeLapse, sloMo, cinematic, video, photo, portrait, pano
+    case timeLapse, video, photo, portrait, pano
 
     var id: Int { rawValue }
 
     var label: String {
         switch self {
         case .timeLapse: return "TIME-LAPSE"
-        case .sloMo: return "SLO-MO"
-        case .cinematic: return "CINEMATIC"
         case .video: return "VIDEO"
         case .photo: return "PHOTO"
         case .portrait: return "PORTRAIT"
@@ -23,7 +21,7 @@ enum CameraMode: Int, CaseIterable, Identifiable {
 
     var isVideoFamily: Bool {
         switch self {
-        case .video, .sloMo, .cinematic, .timeLapse: return true
+        case .video, .timeLapse: return true
         default: return false
         }
     }

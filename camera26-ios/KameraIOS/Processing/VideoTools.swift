@@ -2,52 +2,8 @@ import AVFoundation
 import CoreGraphics
 import UIKit
 
-/// Video helpers: real slow-motion retiming and time-lapse assembly.
+/// Video helpers: time-lapse assembly from captured stills.
 enum VideoTools {
-
-    /// Retimes a high-fps recording so it plays back slowly for real
-    /// (e.g. 120fps -> 30fps playback = 4x slow motion).
-    static func makeSlowMotion(source: URL, fromFps: Int, playbackFps: Int = 30,
-                               completion: @escaping (URL?) -> Void) {
-        let asset = AVAsset(url: source)
-        let factor = max(1, fromFps / playbackFps)
-        guard factor > 1,
-              let videoTrack = asset.tracks(withMediaType: .video).first else {
-            completion(source)
-            return
-        }
-        let composition = AVMutableComposition()
-        let duration = videoTrack.timeRange.duration
-        guard let compVideo = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-            completion(nil)
-            return
-        }
-        do {
-            try compVideo.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: videoTrack, at: .zero)
-            compVideo.preferredTransform = videoTrack.preferredTransform
-            let scaled = CMTimeMultiply(duration, multiplier: Int32(factor))
-            compVideo.scaleTimeRange(CMTimeRange(start: .zero, duration: duration), toDuration: scaled)
-            if let audioTrack = asset.tracks(withMediaType: .audio).first,
-               let compAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-                try compAudio.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: audioTrack, at: .zero)
-                compAudio.scaleTimeRange(CMTimeRange(start: .zero, duration: duration), toDuration: scaled)
-            }
-        } catch {
-            completion(nil)
-            return
-        }
-        let out = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("slomo-\(UUID().uuidString).mp4")
-        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
-            completion(nil)
-            return
-        }
-        export.outputURL = out
-        export.outputFileType = .mp4
-        export.exportAsynchronously {
-            DispatchQueue.main.async { completion(export.status == .completed ? out : nil) }
-        }
-    }
 
     /// Assembles captured stills into a real time-lapse movie
     /// (30fps playback; frames are shot at `interval` seconds).

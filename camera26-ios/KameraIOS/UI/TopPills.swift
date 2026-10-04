@@ -20,7 +20,7 @@ struct TopPills: View {
                         Text("RES")
                             .font(.system(size: 9, weight: .bold))
                             .offset(y: 1)
-                        Text("\(vm.mode == .sloMo ? vm.sloMoRate : vm.fps) FPS")
+                        Text("\(vm.fps) FPS")
                             .font(.system(size: 12, weight: .bold))
                     }
                     .foregroundStyle(.white)

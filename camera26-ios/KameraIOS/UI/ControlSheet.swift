@@ -122,9 +122,15 @@ struct ControlSheet: View {
                     vm.showBanner(vm.torchOn ? "TORCH ON" : "TORCH OFF")
                 },
                 SheetTile(id: "action", symbol: "figure.run", label: "ACTION",
-                          active: vm.actionOn, enabled: true) { vm.sheet = .action },
+                          active: vm.actionOn, enabled: vm.mode == .video) {
+                    if vm.mode == .video { vm.sheet = .action }
+                    else { vm.showToast("ACTION (stabilisasi video) berlaku di mode VIDEO.") }
+                },
                 SheetTile(id: "resolution", symbol: "4k.tv", label: "RESOLUSI",
-                          active: false, enabled: vm.mode != .sloMo) { vm.sheet = .resolution },
+                          active: false, enabled: vm.mode == .video) {
+                    if vm.mode == .video { vm.sheet = .resolution }
+                    else { vm.showToast("Time-lapse dirangkai dari frame foto — resolusi mengikuti kamera foto.") }
+                },
                 SheetTile(id: "exposure", symbol: "plusminus", label: "EXPOSURE",
                           active: vm.focusBias != 0, enabled: true) { vm.sheet = .exposure },
                 SheetTile(id: "styles", symbol: "paintpalette", label: "STYLES",
@@ -450,31 +456,18 @@ struct ControlSheet: View {
     private var resolutionPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             panelHeader("RESOLUTION")
-            if vm.mode == .sloMo {
-                HStack(spacing: 8) {
-                    ForEach(vm.caps.sloMoRates, id: \.self) { rate in
-                        chip("\(rate) FPS", selected: vm.sloMoRate == rate) {
-                            vm.sloMoRate = rate
-                            vm.engine.applyHighSpeedFormat(rate: rate)
-                        }
+            HStack(spacing: 8) {
+                ForEach(vm.caps.videoFormats) { fmt in
+                    chip(fmt.label, selected: vm.selectedFormat?.id == fmt.id) {
+                        vm.selectFormat(fmt)
                     }
                 }
-                Text("SLO-MO merekam di frame rate di atas lalu diputar lambat nyata (dibagi ke 30 FPS).")
-                    .font(.system(size: 11)).foregroundStyle(Color.white.opacity(0.5))
-            } else {
-                HStack(spacing: 8) {
-                    ForEach(vm.caps.videoFormats) { fmt in
-                        chip(fmt.label, selected: vm.selectedFormat?.id == fmt.id) {
-                            vm.selectFormat(fmt)
-                        }
-                    }
-                }
-                Text("FRAME RATE")
-                    .font(.system(size: 11, weight: .bold)).foregroundStyle(Color.white.opacity(0.5))
-                HStack(spacing: 8) {
-                    ForEach(vm.selectedFormat?.fpsOptions ?? [30], id: \.self) { f in
-                        chip("\(f)", selected: vm.fps == f) { vm.selectFps(f) }
-                    }
+            }
+            Text("FRAME RATE")
+                .font(.system(size: 11, weight: .bold)).foregroundStyle(Color.white.opacity(0.5))
+            HStack(spacing: 8) {
+                ForEach(vm.selectedFormat?.fpsOptions ?? [30], id: \.self) { f in
+                    chip("\(f)", selected: vm.fps == f) { vm.selectFps(f) }
                 }
             }
         }

@@ -90,7 +90,10 @@ struct ZoomDial: View {
                         vm.setZoom(ratio: startRatio * factor, animated: false)
                     }
                     .onEnded { _ in
-                        startRatio = vm.zoomRatio
+                        // Authoritative snapshot from the device itself,
+                        // so the next drag continues exactly where the
+                        // zoom actually is — never a stale view value.
+                        startRatio = vm.engine.zoomRatio
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                             vm.dialVisible = false
                         }
