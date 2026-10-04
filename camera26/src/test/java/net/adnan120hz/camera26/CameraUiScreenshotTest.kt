@@ -182,10 +182,10 @@ class CameraUiScreenshotTest {
         val cfg = LocalConfiguration.current
         val letterboxedMode = state.mode == CamMode.PHOTO || state.mode == CamMode.PORTRAIT ||
             state.mode == CamMode.TIME_LAPSE
-        // Preview region: screen minus the black control strip (166dp of
-        // content) and the simulated 48dp navigation bar — mirrors the
+        // Preview region: screen minus the state-dependent black control
+        // strip and the simulated 48dp navigation bar — mirrors the
         // production layout, where the shutter/pill sit on the strip.
-        val regionH = cfg.screenHeightDp.toFloat() - BOTTOM_STRIP_HEIGHT_DP - 48f
+        val regionH = cfg.screenHeightDp.toFloat() - bottomStripHeightDp(state) - 48f
         val area = previewAreaDp(
             aspect = state.aspect,
             filled = state.previewFilled,
@@ -324,6 +324,55 @@ class CameraUiScreenshotTest {
     }
 
     @Test
+    fun onboardingScreen() {
+        // First-run developer introduction (Developer Adnan.120hz +
+        // TikTok / Website / GitHub links + "Mulai").
+        paparazzi.snapshot { OnboardingScreen(onStart = {}) }
+    }
+
+    @Test
+    fun configPanel() {
+        // CONFIG: this app's own photo-quality panel in PHOTO mode —
+        // preset chips + Ketajaman/Saturasi/Kontras/Gamma/Reduksi Noise
+        // sliders (Vivid values dialled in) + Reset. Fields are set
+        // directly here: applyConfigPreset() also persists, and
+        // SharedPreferences stubs return null editors under layoutlib.
+        val state = baseState(paparazzi.context).apply {
+            mode = CamMode.PHOTO
+            configPresetId = "vivid"
+            configSharpness = 0.25f
+            configSaturation = 1.25f
+            configContrast = 1.12f
+            configGamma = 0.95f
+            configDenoise = 0.15f
+            sheet = SheetKind.CONFIG
+        }
+        paparazzi.snapshot { Harness(state) }
+    }
+
+    @Test
+    fun videoActionNoSensor() {
+        // Gyro-less entry device (realme C class): no gyroscope, no
+        // hardware stabilization — ACTION must still offer software EIS
+        // via the fused motion sensor ("Sensor gerak"), not grey out.
+        val state = baseState(paparazzi.context).apply {
+            caps = caps.copy(
+                gyroAvailable = false,
+                rotationVectorAvailable = true,
+                videoStabilization = false,
+                oisAvailable = false,
+                perfTier = PerfTier.ENTRY
+            )
+            mode = CamMode.VIDEO
+            aspect = PhotoAspect.RATIO_16_9
+            actionOn = true
+            eisEnabled = true
+            sheet = SheetKind.ACTION
+        }
+        paparazzi.snapshot { Harness(state) }
+    }
+
+    @Test
     fun stylesPanel() {
         // iOS adjustment bar: ✕ + TONE/WARMTH tick scales, VIBRANT label
         // pill + page dots above it (no Material sliders).
@@ -451,7 +500,7 @@ class CameraUiScreenshotTest {
         val cfg = LocalConfiguration.current
         val letterboxedMode = state.mode == CamMode.PHOTO || state.mode == CamMode.PORTRAIT ||
             state.mode == CamMode.TIME_LAPSE
-        val regionH = cfg.screenHeightDp.toFloat() - BOTTOM_STRIP_HEIGHT_DP - 48f
+        val regionH = cfg.screenHeightDp.toFloat() - bottomStripHeightDp(state) - 48f
         val area = previewAreaDp(
             aspect = state.aspect,
             filled = state.previewFilled,

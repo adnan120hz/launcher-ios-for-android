@@ -184,6 +184,37 @@ fun CameraSettingsScreen(state: CameraState, onBack: () -> Unit) {
                     Text("Kamera iOS", color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
                     Text(versionName, color = Color.White.copy(alpha = 0.55f), fontSize = 14.sp)
                 }
+                // Update notice (only when the GitHub check found a newer
+                // camera release; the check is cached & silent offline).
+                val updTag = state.updateTag
+                val updUrl = state.updateUrl
+                if (updTag != null && updUrl != null) {
+                    SettingsDivider()
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { openUrl(updUrl) }
+                            .padding(horizontal = 16.dp, vertical = 13.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Update tersedia",
+                                color = IosYellow, fontSize = 15.sp, fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                updTag,
+                                color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp
+                            )
+                        }
+                        Text("Unduh  ›", color = IosYellow, fontSize = 13.sp)
+                    }
+                }
+                SettingsDivider()
+                SettingsLinkRow("Perkenalan Developer", "Adnan.120hz") {
+                    state.settingsOpen = false
+                    state.onboardingVisible = true
+                }
             }
             Spacer(Modifier.height(32.dp))
         }

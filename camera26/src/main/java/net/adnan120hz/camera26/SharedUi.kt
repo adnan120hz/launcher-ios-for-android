@@ -474,6 +474,7 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
             SheetKind.STYLES -> "STYLES"
             SheetKind.APERTURE -> "APERTURE"
             SheetKind.ACTION -> "ACTION"
+            SheetKind.CONFIG -> "CONFIG"
             else -> ""
         }
         Text(title, color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -611,12 +612,12 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                 }
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    "EIS (GYRO)", color = Color.White.copy(alpha = 0.55f),
+                    "EIS (SOFTWARE)", color = Color.White.copy(alpha = 0.55f),
                     fontSize = 11.sp, fontWeight = FontWeight.Bold
                 )
                 Spacer(Modifier.height(8.dp))
                 when {
-                    state.caps.gyroAvailable -> {
+                    state.caps.motionAvailable -> {
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             OptionChip("Nonaktif", !state.eisEnabled) {
                                 state.eisEnabled = false
@@ -629,25 +630,30 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                         }
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            if (state.mode == CamMode.SLO_MO) {
-                                "SLO-MO memakai stabilisasi hardware (API); EIS gyro berlaku untuk mode VIDEO."
-                            } else if (state.eisActive) {
-                                "EIS software (gyro) sedang aktif — pratinjau & rekaman distabilkan."
-                            } else {
-                                "EIS software (gyro) menyala otomatis saat ACTION aktif di mode VIDEO."
+                            when {
+                                state.mode == CamMode.SLO_MO ->
+                                    "SLO-MO memakai stabilisasi hardware (API); EIS software berlaku untuk mode VIDEO."
+                                state.caps.gyroAvailable && state.eisActive ->
+                                    "EIS software sedang aktif — sumber gerak: Gyroscope."
+                                state.caps.gyroAvailable ->
+                                    "EIS software (gyro) menyala otomatis saat ACTION aktif di mode VIDEO."
+                                state.eisActive ->
+                                    "EIS software sedang aktif — sumber gerak: Sensor gerak (akselerometer + kompas), karena perangkat ini tanpa gyroscope."
+                                else ->
+                                    "Perangkat ini tanpa gyroscope — EIS software memakai sensor gerak gabungan (akselerometer + kompas) dan menyala otomatis saat ACTION aktif di mode VIDEO."
                             },
                             color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
                         )
                     }
                     state.caps.videoStabilization || state.caps.oisAvailable -> {
                         Text(
-                            "Tidak ada gyroscope — ACTION memakai stabilisasi hardware (OIS/EIS via API kamera).",
+                            "Tidak ada sensor gerak yang dapat dipakai — ACTION memakai stabilisasi hardware (OIS/EIS via API kamera).",
                             color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
                         )
                     }
                     else -> {
                         Text(
-                            "Perangkat ini tidak melaporkan gyroscope maupun stabilisasi hardware.",
+                            "Perangkat ini tidak melaporkan gyroscope, sensor gerak gabungan, maupun stabilisasi hardware.",
                             color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
                         )
                     }
@@ -658,7 +664,114 @@ fun SubPanelContent(kind: SheetKind, state: CameraState, actions: CameraActions)
                     color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp
                 )
             }
+            SheetKind.CONFIG -> {
+                ConfigPanel(state)
+            }
             else -> Unit
+        }
+    }
+}
+
+/**
+ * CONFIG panel: this app's own photo-quality configuration. Preset chips
+ * fill the five sliders; any slider move marks the setup "Kustom". All of
+ * it is applied for real to captured photos (PhotoConfigProcessor) — the
+ * panel says so instead of pretending to be a GCam XML import.
+ */
+@Composable
+private fun ConfigPanel(state: CameraState) {
+    // Preset chips.
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        PhotoConfigPresets.forEach { preset ->
+            OptionChip(preset.label, state.configPresetId == preset.id) {
+                state.applyConfigPreset(preset)
+            }
+        }
+        if (state.configPresetId == "custom") {
+            OptionChip("Kustom", true) { /* already custom */ }
+        }
+    }
+    Spacer(Modifier.height(14.dp))
+
+    @Composable
+    fun configSlider(
+        label: String,
+        valueText: String,
+        value: Float,
+        range: ClosedFloatingPointRange<Float>,
+        onChange: (Float) -> Unit
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp,
+                modifier = Modifier.width(96.dp)
+            )
+            Slider(
+                value = value,
+                onValueChange = { v ->
+                    onChange(v)
+                    state.markConfigCustom()
+                },
+                onValueChangeFinished = { state.persistAll() },
+                valueRange = range,
+                modifier = Modifier.weight(1f),
+                colors = SliderDefaults.colors(
+                    thumbColor = IosYellow,
+                    activeTrackColor = Color.White.copy(alpha = 0.85f),
+                    inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+                )
+            )
+            Text(
+                valueText,
+                color = IosYellow, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.width(46.dp),
+                textAlign = androidx.compose.ui.text.style.TextAlign.End
+            )
+        }
+    }
+
+    configSlider(
+        "Ketajaman", "${(state.configSharpness * 100).roundToInt()}",
+        state.configSharpness, 0f..1f
+    ) { state.configSharpness = it }
+    configSlider(
+        "Saturasi", String.format(Locale.US, "%.2f", state.configSaturation),
+        state.configSaturation, 0.5f..1.6f
+    ) { state.configSaturation = it }
+    configSlider(
+        "Kontras", String.format(Locale.US, "%.2f", state.configContrast),
+        state.configContrast, 0.6f..1.5f
+    ) { state.configContrast = it }
+    configSlider(
+        "Gamma", String.format(Locale.US, "%.2f", state.configGamma),
+        state.configGamma, 0.6f..1.6f
+    ) { state.configGamma = it }
+    configSlider(
+        "Reduksi Noise", "${(state.configDenoise * 100).roundToInt()}",
+        state.configDenoise, 0f..1f
+    ) { state.configDenoise = it }
+
+    Spacer(Modifier.height(10.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Config bawaan aplikasi ini — diterapkan nyata pada hasil foto.",
+            color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp,
+            modifier = Modifier.weight(1f)
+        )
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.10f))
+                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(50))
+                .clickable { state.applyConfigPreset(PhotoConfigPresets.first()) }
+                .padding(horizontal = 14.dp, vertical = 7.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("Reset", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -767,9 +880,23 @@ fun ZoomDial(
     var acc by remember { mutableFloatStateOf(0f) }
     val gesture = Modifier.pointerInput(Unit) {
         detectDragGestures(
-            onDragStart = { startRatio = state.zoomTarget; acc = 0f },
-            onDragEnd = { onDone() },
-            onDragCancel = { onDone() },
+            // Anchor the gesture to the DISPLAYED ratio, not the pending
+            // target: if a button animation was still in flight, starting
+            // from the stale target made the dial appear to jump (and
+            // spring) back — the reported "mental ke 1x" behaviour.
+            onDragStart = {
+                startRatio = state.zoomRatio
+                acc = 0f
+                state.zoomDialDriven = true
+            },
+            onDragEnd = {
+                state.zoomDialDriven = false
+                onDone()
+            },
+            onDragCancel = {
+                state.zoomDialDriven = false
+                onDone()
+            },
             onDrag = { change, drag ->
                 change.consume()
                 acc += drag.x

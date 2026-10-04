@@ -26,7 +26,7 @@ enum class FlashSetting { OFF, AUTO, ON }
 
 enum class PhotoAspect { RATIO_4_3, RATIO_16_9, SQUARE }
 
-enum class SheetKind { NONE, GRID, FLASH, EXPOSURE, TIMER, ASPECT, RESOLUTION, FILTER, STYLES, APERTURE, ACTION }
+enum class SheetKind { NONE, GRID, FLASH, EXPOSURE, TIMER, ASPECT, RESOLUTION, FILTER, STYLES, APERTURE, ACTION, CONFIG }
 
 data class VideoResOption(val label: String, val qualityName: String)
 
@@ -81,6 +81,59 @@ class CameraState(context: Context) {
 
     var sheet by mutableStateOf(SheetKind.NONE)
     var dialVisible by mutableStateOf(false)
+
+    /**
+     * True while the zoom ARC DIAL (not buttons/pinch) is the input that
+     * last moved the zoom target — selects the dial's own, tighter zoom
+     * smoothing in the animator. Runtime only.
+     */
+    var zoomDialDriven by mutableStateOf(false)
+
+    /** Session flag: the CINEMATIC "not supported" toast shows ONCE. */
+    var cinematicNoticeShown by mutableStateOf(false)
+
+    // First-run onboarding ("Developer Adnan.120hz" intro): shown once,
+    // persisted, re-openable from Settings. Runtime visibility is kept
+    // separate so re-opening does not reset the "seen" flag.
+    var onboardingDone by mutableStateOf(prefs?.getBoolean("onboarded", false) ?: false)
+    var onboardingVisible by mutableStateOf(false)
+
+    /** Latest GitHub camera release found by the update checker (runtime). */
+    var updateTag by mutableStateOf<String?>(null)
+    var updateUrl by mutableStateOf<String?>(null)
+
+    // CONFIG (this app's own photo-quality settings, PhotoConfig.kt):
+    // five real adjustments applied to captured photos, persisted.
+    var configPresetId by mutableStateOf(prefs?.getString("config_preset", "default") ?: "default")
+    var configSharpness by mutableFloatStateOf(prefs?.getFloat("config_sharpness", 0f) ?: 0f)
+    var configSaturation by mutableFloatStateOf(prefs?.getFloat("config_saturation", 1f) ?: 1f)
+    var configContrast by mutableFloatStateOf(prefs?.getFloat("config_contrast", 1f) ?: 1f)
+    var configGamma by mutableFloatStateOf(prefs?.getFloat("config_gamma", 1f) ?: 1f)
+    var configDenoise by mutableFloatStateOf(prefs?.getFloat("config_denoise", 0f) ?: 0f)
+
+    fun photoConfig(): PhotoConfig = PhotoConfig(
+        sharpness = configSharpness,
+        saturation = configSaturation,
+        contrast = configContrast,
+        gamma = configGamma,
+        denoise = configDenoise
+    )
+
+    /** Apply a CONFIG preset: fills the sliders, persists. */
+    fun applyConfigPreset(preset: PhotoConfigPreset) {
+        configPresetId = preset.id
+        configSharpness = preset.config.sharpness
+        configSaturation = preset.config.saturation
+        configContrast = preset.config.contrast
+        configGamma = preset.config.gamma
+        configDenoise = preset.config.denoise
+        persistAll()
+    }
+
+    /** Any manual slider move turns the preset into "Kustom". */
+    fun markConfigCustom() {
+        if (configPresetId != "custom") configPresetId = "custom"
+    }
 
     // Mode carousel pill (below the shutter): horizontal drag offset in px,
     // written by the pill's gesture handler and settled back to 0 on release.
@@ -337,6 +390,13 @@ class CameraState(context: Context) {
             .putBoolean("eis_enabled", eisEnabled)
             .putFloat("grade_intensity", gradeIntensity)
             .putFloat("grade_warmth", gradeWarmth)
+            .putString("config_preset", configPresetId)
+            .putFloat("config_sharpness", configSharpness)
+            .putFloat("config_saturation", configSaturation)
+            .putFloat("config_contrast", configContrast)
+            .putFloat("config_gamma", configGamma)
+            .putFloat("config_denoise", configDenoise)
+            .putBoolean("onboarded", onboardingDone)
             .apply()
     }
 }

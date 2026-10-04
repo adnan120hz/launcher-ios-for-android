@@ -33,7 +33,7 @@ object EisTuning {
     const val CORRECTION_RATE_DEG_S = 300f
 
     /** Adaptive crop: total crop fraction from tiny to heavy shake. */
-    const val CROP_MIN = 0.08f
+    const val CROP_MIN = 0.06f
     const val CROP_MAX = 0.18f
 
     /** Shake amplitude (deg of raw-vs-smoothed delta) mapped onto the crop. */
@@ -49,12 +49,13 @@ object EisTuning {
     const val CROP_INITIAL = 0.12f
 
     /** Generous 1080p-class encoder bitrate (per-pixel, clamped). */
-    const val BITRATE_PER_PIXEL = 9L
+    const val BITRATE_PER_PIXEL = 10L
     const val BITRATE_MIN = 10_000_000
     const val BITRATE_MAX = 24_000_000
 
-    /** Mild GL unsharp amount after the warp (0 = off). */
-    const val UNSHARP_AMOUNT = 0.30f
+    /** Mild GL unsharp amount after the warp (0 = off). Kept gentle: more
+     *  than this rings halos around edges on entry-level encoders. */
+    const val UNSHARP_AMOUNT = 0.25f
 
     /** Crop fraction for a measured shake amplitude. */
     fun cropForShake(ampDeg: Float): Float {
@@ -67,13 +68,30 @@ object EisTuning {
 /** A gain-scaled, clamped counter-rotation for one camera frame. */
 data class Correction(val quat: FloatArray, val deltaDeg: Float)
 
+/** Where the pipeline's orientation samples come from. */
+enum class MotionSource {
+    /** A real gyroscope, integrated directly. Best quality. */
+    GYROSCOPE,
+
+    /**
+     * Fused orientation (accelerometer + magnetometer) on phones without
+     * a gyroscope: orientation samples feed the exact same correction
+     * math, so software EIS still runs — honestly lower-grade, mostly in
+     * yaw stability, and the UI names this source instead of pretending.
+     */
+    ROTATION_VECTOR,
+    NONE
+}
+
 /**
- * Software gyroscope tracker for the ACTION (EIS) pipeline and PANO.
+ * Motion tracker for the ACTION (EIS) pipeline and PANO.
  *
- * Integrates raw angular velocity into device-orientation quaternions on a
- * dedicated sensor thread at the sensor's fastest rate
- * (SENSOR_DELAY_FASTEST), keeping a short ring buffer of timestamped
- * samples. Two queries:
+ * With a gyroscope, raw angular velocity is integrated into
+ * device-orientation quaternions on a dedicated sensor thread at the
+ * sensor's fastest rate (SENSOR_DELAY_FASTEST). Without one, the fused
+ * ROTATION_VECTOR sensor supplies orientation quaternions directly into
+ * the same sample buffer ("virtual gyro") — all queries below work on
+ * orientations either way. Two queries:
  *  - [rawOrientationAt]: the interpolated raw orientation (PANO yaw).
  *  - [correctionAt]: the EIS counter-rotation for a frame timestamp —
  *    the frame's raw orientation vs a Gaussian-smoothed TRAJECTORY
@@ -92,9 +110,21 @@ class GyroTracker(context: Context) {
         context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
     private val gyroSensor: Sensor? =
         sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private val rotationSensor: Sensor? =
+        sensorManager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
-    /** True when this device really has a gyroscope to integrate. */
-    val available: Boolean get() = gyroSensor != null
+    /** The motion source this device will actually feed the pipeline. */
+    val source: MotionSource = when {
+        gyroSensor != null -> MotionSource.GYROSCOPE
+        rotationSensor != null -> MotionSource.ROTATION_VECTOR
+        else -> MotionSource.NONE
+    }
+
+    /** True when this device has any motion source to track with. */
+    val available: Boolean get() = source != MotionSource.NONE
+
+    private val activeSensor: Sensor?
+        get() = if (source == MotionSource.GYROSCOPE) gyroSensor else rotationSensor
 
     private class Sample(val timestampNs: Long, val raw: FloatArray)
 
@@ -116,6 +146,25 @@ class GyroTracker(context: Context) {
         override fun onSensorChanged(event: SensorEvent) {
             try {
                 val ts = event.timestamp
+                if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
+                    // Virtual gyro: the fused sensor already reports an
+                    // orientation quaternion (axis*sin(θ/2), cos(θ/2));
+                    // feed it into the same sample buffer the correction
+                    // math consumes. No integration, no drift build-up.
+                    val v = event.values
+                    val x = v.getOrElse(0) { 0f }
+                    val y = v.getOrElse(1) { 0f }
+                    val z = v.getOrElse(2) { 0f }
+                    val w = if (v.size >= 4) {
+                        v[3]
+                    } else {
+                        sqrt(maxOf(0f, 1f - x * x - y * y - z * z))
+                    }
+                    current = normalize(floatArrayOf(w, x, y, z))
+                    lastTimestampNs = ts
+                    push(ts)
+                    return
+                }
                 if (lastTimestampNs == 0L) {
                     lastTimestampNs = ts
                     push(ts)
@@ -153,7 +202,8 @@ class GyroTracker(context: Context) {
     }
 
     fun start() {
-        if (gyroSensor == null || thread != null) return
+        val sensor = activeSensor
+        if (sensor == null || thread != null) return
         try {
             current = floatArrayOf(1f, 0f, 0f, 0f)
             lastTimestampNs = 0L
@@ -163,7 +213,7 @@ class GyroTracker(context: Context) {
             thread = t
             handler = Handler(t.looper)
             sensorManager?.registerListener(
-                listener, gyroSensor, SensorManager.SENSOR_DELAY_FASTEST, handler
+                listener, sensor, SensorManager.SENSOR_DELAY_FASTEST, handler
             )
         } catch (e: Throwable) {
             stop()

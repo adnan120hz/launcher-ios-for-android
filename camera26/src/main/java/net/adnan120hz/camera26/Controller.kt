@@ -363,6 +363,7 @@ class CameraController(private val context: Context) {
         squareCrop: Boolean,
         gradeMatrix: FloatArray? = null,
         portraitStrength: Float? = null,
+        photoConfig: PhotoConfig? = null,
         onSaved: (Uri) -> Unit,
         onError: (String) -> Unit,
         onNotice: (String) -> Unit = {}
@@ -370,7 +371,8 @@ class CameraController(private val context: Context) {
         val ic = imageCapture ?: run { onError("Kamera belum siap"); return }
         ic.takePicture(mainExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
-                val needsBitmap = squareCrop || gradeMatrix != null || portraitStrength != null
+                val needsBitmap = squareCrop || gradeMatrix != null || portraitStrength != null ||
+                    (photoConfig != null && !photoConfig.isNeutral)
                 if (!needsBitmap) {
                     // Fast path: save the captured JPEG untouched.
                     try {
@@ -398,7 +400,16 @@ class CameraController(private val context: Context) {
                 processingExecutor.execute {
                     fun finish(processed: Bitmap, notice: String? = null) {
                         try {
-                            val finalBmp = if (squareCrop) cropBitmapToSquare(processed) else processed
+                            // CONFIG (the app's own quality settings) is
+                            // applied for real, after any colour grade.
+                            val configured = if (
+                                photoConfig != null && !photoConfig.isNeutral
+                            ) {
+                                PhotoConfigProcessor.apply(processed, photoConfig)
+                            } else {
+                                processed
+                            }
+                            val finalBmp = if (squareCrop) cropBitmapToSquare(configured) else configured
                             val baos = ByteArrayOutputStream()
                             finalBmp.compress(Bitmap.CompressFormat.JPEG, 95, baos)
                             val uri = saveJpeg(baos.toByteArray())

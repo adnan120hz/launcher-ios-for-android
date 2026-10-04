@@ -59,7 +59,7 @@ import kotlin.math.abs
  * The warp rotates each frame by the gyro trajectory correction
  * (trajectory-smoothed orientation vs the frame's raw orientation,
  * gain-scaled in GyroTracker) and crops adaptively: the crop follows the
- * measured shake amplitude (8% when the phone is nearly still, up to 18%
+ * measured shake amplitude (6% when the phone is nearly still, up to 18%
  * in heavy shake — see EisTuning) so quality is not thrown away on calm
  * frames, and crop changes are smoothed so they never read as zoom
  * pumping. The sensor stream supersamples (up to 2560x1440) into the
@@ -72,7 +72,10 @@ import kotlin.math.abs
  * reports through [Listener.onFailed] so the caller can fall back to the
  * hardware-stabilization / plain CameraX path — recording never hard-crashes.
  */
-class EisPipeline(private val context: Context) {
+class EisPipeline(
+    private val context: Context,
+    private val perfTier: PerfTier = PerfTier.FLAGSHIP
+) {
 
     interface Listener {
         fun onStarted()
@@ -90,6 +93,20 @@ class EisPipeline(private val context: Context) {
 
     private val gyro = GyroTracker(context)
     val gyroAvailable: Boolean get() = gyro.available
+
+    /** Which motion source feeds the warp (real gyroscope or virtual). */
+    val motionSource: MotionSource get() = gyro.source
+
+    /** Long-side cap for the sensor stream, scaled by performance tier. */
+    private val streamLongCap: Int = when (perfTier) {
+        PerfTier.ENTRY -> 1280
+        PerfTier.MID -> 1920
+        PerfTier.FLAGSHIP -> 2560
+    }
+
+    /** GL unsharp: off on entry-tier (saves a pass + encoder artefacts). */
+    private val sharpAmount: Float =
+        if (perfTier == PerfTier.ENTRY) 0f else EisTuning.UNSHARP_AMOUNT
 
     // -- pipeline thread -----------------------------------------------------
     private var thread: HandlerThread? = null
@@ -261,7 +278,7 @@ class EisPipeline(private val context: Context) {
     }
 
     private fun startOnThread(front: Boolean) {
-        if (!gyro.available) throw IllegalStateException("Gyroscope tidak tersedia")
+        if (!gyro.available) throw IllegalStateException("Sensor gerak tidak tersedia")
         val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val targetFacing = if (front) {
             CameraCharacteristics.LENS_FACING_FRONT
@@ -303,7 +320,6 @@ class EisPipeline(private val context: Context) {
         initGl()
 
         val st = surfaceTexture ?: throw IllegalStateException("SurfaceTexture gagal")
-        cameraSurface = Surface(st)
 
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
@@ -335,43 +351,95 @@ class EisPipeline(private val context: Context) {
         openError?.let { throw it }
         val device = cameraDevice ?: throw IllegalStateException("Kamera gagal dibuka")
 
-        val sessionLatch = CountDownLatch(1)
-        var sessionError: Throwable? = null
-        val surface = cameraSurface ?: throw IllegalStateException("Surface kamera tidak ada")
-        @Suppress("DEPRECATION")
-        device.createCaptureSession(
-            listOf(surface),
-            object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(s: CameraCaptureSession) {
-                    session = s
-                    sessionLatch.countDown()
-                }
+        // Staged session sizes: some entry-level HALs reject the picked
+        // (large) stream size in a session even though they list it — step
+        // down through smaller sizes before giving up entirely.
+        var sessionOk = false
+        var lastError: Throwable? = null
+        for (attemptSize in sessionSizeAttempts(sizes)) {
+            frameSize = attemptSize
+            try {
+                st.setDefaultBufferSize(attemptSize.width, attemptSize.height)
+            } catch (e: Throwable) { /* texture already sized */ }
+            val attemptSurface = Surface(st)
+            val latch = CountDownLatch(1)
+            var attemptError: Throwable? = null
+            @Suppress("DEPRECATION")
+            device.createCaptureSession(
+                listOf(attemptSurface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(s: CameraCaptureSession) {
+                        session = s
+                        cameraSurface = attemptSurface
+                        latch.countDown()
+                    }
 
-                override fun onConfigureFailed(s: CameraCaptureSession) {
-                    sessionError = IllegalStateException("Sesi kamera gagal")
-                    sessionLatch.countDown()
-                }
-            },
-            handler
-        )
-        if (!sessionLatch.await(5, TimeUnit.SECONDS)) {
-            throw IllegalStateException("Timeout sesi kamera")
+                    override fun onConfigureFailed(s: CameraCaptureSession) {
+                        attemptError = IllegalStateException("Sesi kamera gagal")
+                        latch.countDown()
+                    }
+                },
+                handler
+            )
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                attemptError = IllegalStateException("Timeout sesi kamera")
+            }
+            if (attemptError == null && session != null) {
+                sessionOk = true
+                break
+            }
+            lastError = attemptError
+            try {
+                session?.close()
+            } catch (e: Throwable) { /* ignore */ }
+            session = null
+            if (cameraSurface !== attemptSurface) {
+                try {
+                    attemptSurface.release()
+                } catch (e: Throwable) { /* ignore */ }
+            }
         }
-        sessionError?.let { throw it }
+        if (!sessionOk) {
+            throw lastError ?: IllegalStateException("Sesi kamera gagal")
+        }
         applyRepeatingRequest()
+    }
+
+    /**
+     * Ordered stream sizes to attempt for the capture session: the picked
+     * (quality-first) size, then progressively smaller fallbacks.
+     */
+    private fun sessionSizeAttempts(sizes: List<Size>): List<Size> {
+        val attempts = ArrayList<Size>()
+        attempts += frameSize
+        fun closestTo(tw: Int, th: Int): Size? = sizes.minByOrNull {
+            abs(it.width - tw) + abs(it.height - th)
+        }
+        if (sizes.isNotEmpty()) {
+            closestTo(1280, 720)?.let { attempts += it }
+            closestTo(640, 480)?.let { attempts += it }
+            sizes.minByOrNull { it.width.toLong() * it.height }?.let { attempts += it }
+        } else {
+            attempts += Size(1280, 720)
+            attempts += Size(640, 480)
+        }
+        return attempts.distinct()
     }
 
     private fun pickFrameSize(sizes: List<Size>): Size {
         if (sizes.isEmpty()) return Size(1280, 720)
         // Supersample for quality: the GL warp downscales the sensor
-        // stream onto the <=1080p encoder, so the largest stream up to
-        // 2560x1440 hands the stabilizer real pixels to crop into instead
-        // of upscaling a cropped 1080p frame back up afterwards.
+        // stream onto the <=1080p encoder, so the largest stream hands
+        // the stabilizer real pixels to crop into instead of upscaling a
+        // cropped 1080p frame back up afterwards. The cap follows the
+        // performance tier so entry-level GPUs are not drowned in pixels.
         val wide = sizes.filter {
             abs(it.width.toFloat() / it.height - 16f / 9f) < 0.06f
         }
         val pool = if (wide.isNotEmpty()) wide else sizes
-        val capped = pool.filter { it.width <= 2560 && it.height <= 1440 }
+        val capped = pool.filter {
+            it.width <= streamLongCap && it.height <= streamLongCap
+        }
         return if (capped.isNotEmpty()) {
             capped.maxByOrNull { it.width.toLong() * it.height }!!
         } else {
@@ -464,29 +532,61 @@ class EisPipeline(private val context: Context) {
         // frame must match that orientation: portrait-held phones get a
         // portrait MP4 (long side still capped at 1920, short at 1080).
         val quarterTurn = ((sensorOrientation - displayRotationDeg) % 180 + 180) % 180 != 0
-        var longSide = minOf(maxOf(outWidth, outHeight), 1920)
-        var shortSide = minOf(minOf(outWidth, outHeight), 1080)
-        val w = if (quarterTurn) shortSide else longSide
-        val hgt = if (quarterTurn) longSide else shortSide
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, hgt)
-        format.setInteger(
-            MediaFormat.KEY_COLOR_FORMAT,
-            MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-        )
-        val pixels = w.toLong() * hgt.toLong()
-        format.setInteger(
-            MediaFormat.KEY_BIT_RATE,
-            (pixels * EisTuning.BITRATE_PER_PIXEL)
-                .coerceIn(EisTuning.BITRATE_MIN.toLong(), EisTuning.BITRATE_MAX.toLong())
-                .toInt()
-        )
-        format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        encoderInputSurface = codec.createInputSurface()
-        codec.start()
+        val longSide = minOf(maxOf(outWidth, outHeight), 1920)
+        val shortSide = minOf(minOf(outWidth, outHeight), 1080)
+
+        // Staged encoder init: entry-level encoders sometimes reject the
+        // requested size/bitrate combination — step down through smaller,
+        // cheaper configurations before conceding to the fallback path.
+        val dimAttempts = ArrayList<Pair<Int, Int>>()
+        fun dims(ls: Int, ss: Int) {
+            val w = if (quarterTurn) ss else ls
+            val h = if (quarterTurn) ls else ss
+            val aligned = Pair(
+                (w / 16 * 16).coerceAtLeast(176),
+                (h / 16 * 16).coerceAtLeast(176)
+            )
+            if (aligned !in dimAttempts) dimAttempts += aligned
+        }
+        dims(longSide, shortSide)
+        dims(minOf(longSide, 1280), minOf(shortSide, 720))
+        dims(minOf(longSide, 854), minOf(shortSide, 480))
+        var codec: MediaCodec? = null
+        var lastEncError: Throwable? = null
+        for ((w, h) in dimAttempts) {
+            try {
+                val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
+                format.setInteger(
+                    MediaFormat.KEY_COLOR_FORMAT,
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+                )
+                val pixels = w.toLong() * h.toLong()
+                format.setInteger(
+                    MediaFormat.KEY_BIT_RATE,
+                    (pixels * EisTuning.BITRATE_PER_PIXEL)
+                        .coerceIn(EisTuning.BITRATE_MIN.toLong(), EisTuning.BITRATE_MAX.toLong())
+                        .toInt()
+                )
+                format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                encoderInputSurface = c.createInputSurface()
+                c.start()
+                codec = c
+                break
+            } catch (e: Throwable) {
+                lastEncError = e
+                try {
+                    encoderInputSurface?.release()
+                } catch (t: Throwable) { /* ignore */ }
+                encoderInputSurface = null
+            }
+        }
         videoCodec = codec
+            ?: throw IllegalStateException(
+                "Encoder video tidak dapat dibuat: ${lastEncError?.message}"
+            )
 
         // Encoder EGL window surface sharing the pipeline GL context.
         val display = eglDisplay ?: throw IllegalStateException("EGL belum siap")
@@ -1071,7 +1171,7 @@ class EisPipeline(private val context: Context) {
                 1f / frameSize.width.coerceAtLeast(1),
                 1f / frameSize.height.coerceAtLeast(1)
             )
-            GLES20.glUniform1f(uSharp, EisTuning.UNSHARP_AMOUNT)
+            GLES20.glUniform1f(uSharp, sharpAmount)
             val buf = quadBuffer.asFloatBuffer()
             buf.position(0)
             GLES20.glEnableVertexAttribArray(aPos)

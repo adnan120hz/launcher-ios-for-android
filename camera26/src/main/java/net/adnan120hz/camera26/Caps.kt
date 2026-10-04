@@ -21,6 +21,12 @@ data class LensSession(
     val label: String   // "0.5", "1x", "3x"
 )
 
+/**
+ * Coarse performance class of the device, used to scale real work (EIS
+ * stream size, glass effects) — never to gate features or change the UI.
+ */
+enum class PerfTier { ENTRY, MID, FLAGSHIP }
+
 data class DeviceCaps(
     val backSessions: List<LensSession> = emptyList(),
     val baseEqMm: Float = 0f,            // equivalent focal at 1x; 0 = unknown -> hide MM labels
@@ -37,8 +43,19 @@ data class DeviceCaps(
     /** True when the lens reports hardware optical stabilization (OIS). */
     val oisAvailable: Boolean = false,
     /** True when the device has a real gyroscope (software gyro-EIS input). */
-    val gyroAvailable: Boolean = false
-)
+    val gyroAvailable: Boolean = false,
+    /**
+     * True when a fused orientation sensor (accelerometer + magnetometer)
+     * exists: the "virtual gyro" source for software EIS on phones that
+     * ship without a gyroscope (most entry-level devices).
+     */
+    val rotationVectorAvailable: Boolean = false,
+    /** Performance class used to scale EIS stream size / glass cost. */
+    val perfTier: PerfTier = PerfTier.FLAGSHIP
+) {
+    /** Any motion source the software-EIS pipeline can consume. */
+    val motionAvailable: Boolean get() = gyroAvailable || rotationVectorAvailable
+}
 
 fun formatRatioLabel(ratio: Float): String =
     if (ratio < 0.95f) {
@@ -143,12 +160,41 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
     val oisModes = logical.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
     val ois = oisModes?.any { it == 1 } == true
 
-    // A real gyroscope sensor is the input for the software gyro-EIS pipeline.
+    // Motion sensors for the software gyro-EIS pipeline: a real gyroscope
+    // is best; the fused rotation-vector sensor (accelerometer +
+    // magnetometer) is the fallback that keeps software EIS alive on
+    // entry-level phones that ship without a gyroscope.
+    val sensorManager = try {
+        context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager
+    } catch (e: Throwable) {
+        null
+    }
     val gyro = try {
-        (context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager)
-            ?.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) != null
+        sensorManager?.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) != null
     } catch (e: Throwable) {
         false
+    }
+    val rotVec = try {
+        sensorManager?.getDefaultSensor(android.hardware.Sensor.TYPE_ROTATION_VECTOR) != null
+    } catch (e: Throwable) {
+        false
+    }
+
+    // Performance tier from total RAM (and the low-RAM flag): entry-level
+    // phones get a cheaper EIS stream and plainer glass, flagships the
+    // full pipeline. Features and UI are identical across tiers.
+    val perfTier = try {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val mi = android.app.ActivityManager.MemoryInfo()
+        am?.getMemoryInfo(mi)
+        val gb = mi.totalMem / (1024.0 * 1024.0 * 1024.0)
+        when {
+            am?.isLowRamDevice == true || gb < 3.5 -> PerfTier.ENTRY
+            gb < 6.0 -> PerfTier.MID
+            else -> PerfTier.FLAGSHIP
+        }
+    } catch (e: Throwable) {
+        PerfTier.MID
     }
 
     return DeviceCaps(
@@ -162,7 +208,9 @@ private fun computeCapsInternal(context: Context): DeviceCaps {
         timelapseAvailable = avcEncoderAvailable(),
         videoStabilization = stab,
         oisAvailable = ois,
-        gyroAvailable = gyro
+        gyroAvailable = gyro,
+        rotationVectorAvailable = rotVec,
+        perfTier = perfTier
     )
 }
 

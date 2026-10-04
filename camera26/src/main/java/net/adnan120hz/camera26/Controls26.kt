@@ -84,17 +84,36 @@ import kotlinx.coroutines.launch
  */
 internal const val BOTTOM_STRIP_HEIGHT_DP = 166f
 
-/** Height of the top pills (GlassPill: 8dp vertical padding ×2 + ~22dp content). */
-private val TOP_PILL_HEIGHT_DP = 38.dp
+/** Extra strip height while the PORTRAIT lighting wheel rides the strip. */
+internal const val PORTRAIT_BAR_HEIGHT_DP = 80f
+
+/**
+ * Real height (dp, excluding nav inset) of the bottom control strip for
+ * the current state. The preview region must be computed from THIS (not
+ * the bare constant) or the preview creeps up behind the top pill band
+ * whenever the strip grows (Portrait wheel) — the missing top black band.
+ */
+internal fun bottomStripHeightDp(state: CameraState): Float =
+    BOTTOM_STRIP_HEIGHT_DP + if (
+        state.mode == CamMode.PORTRAIT && state.sheet == SheetKind.NONE
+    ) PORTRAIT_BAR_HEIGHT_DP else 0f
+
+/** Height of the top pills (40dp touch boxes + 1dp glass padding ×2). */
+private val TOP_PILL_HEIGHT_DP = 42.dp
 
 @Composable
-private fun GlassPill(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
+private fun GlassPill(
+    modifier: Modifier = Modifier,
+    hPad: androidx.compose.ui.unit.Dp = 14.dp,
+    vPad: androidx.compose.ui.unit.Dp = 8.dp,
+    content: @Composable RowScope.() -> Unit
+) {
     Row(
         modifier
             .clip(RoundedCornerShape(50))
             .background(GlassPillBrush)
             .border(1.dp, GlassRim, RoundedCornerShape(50))
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .padding(horizontal = hPad, vertical = vPad),
         verticalAlignment = Alignment.CenterVertically,
         content = content
     )
@@ -155,7 +174,11 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                             state.mode == CamMode.SLO_MO || state.mode == CamMode.TIME_LAPSE
                         Column {
                             if (videoFamily && !state.isRecording && !state.timelapseRunning) {
-                                GlassPill(Modifier.clickable { actions.onOpenSheet(SheetKind.RESOLUTION) }) {
+                                GlassPill(
+                                    Modifier
+                                        .height(40.dp)
+                                        .clickable { actions.onOpenSheet(SheetKind.RESOLUTION) }
+                                ) {
                                     Text(
                                         state.videoRes?.label ?: "HD",
                                         color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold
@@ -177,15 +200,20 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                             } else {
                                 Spacer(Modifier.width(1.dp))
                             }
-                            // Software gyro-EIS status: visible while the GL pipeline
-                            // is live; flags the 1080p cap honestly when 4K is picked.
+                            // Software EIS status: visible while the GL pipeline
+                            // is live; names the motion source honestly and
+                            // flags the 1080p cap when 4K is picked.
                             if (state.eisActive) {
                                 Spacer(Modifier.height(6.dp))
                                 GlassPill {
                                     RunnerGlyph(IosYellow, Modifier.size(14.dp), off = false)
                                     Spacer(Modifier.width(6.dp))
                                     Text(
-                                        if (state.eisCapped) "EIS · maks 1080p" else "EIS",
+                                        when {
+                                            state.eisCapped -> "EIS · maks 1080p"
+                                            state.caps.gyroAvailable -> "EIS · Gyroscope"
+                                            else -> "EIS · Sensor gerak"
+                                        },
                                         color = IosYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold
                                     )
                                 }
@@ -198,13 +226,15 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                             // flash · Styles · grid in ONE pill (front camera:
                             // moon · flash · Live · grid); the video family
                             // carries flash · grid. Active icons glow yellow.
-                            GlassPill {
+                            // Icons sit in 40dp touch boxes (visual glyph and
+                            // pill outline unchanged) — no more precision taps.
+                            GlassPill(hPad = 6.dp, vPad = 1.dp) {
                                 val videoFamilyPill = state.mode == CamMode.VIDEO ||
                                     state.mode == CamMode.SLO_MO || state.mode == CamMode.TIME_LAPSE
                                 if (!videoFamilyPill && state.nightExtAvailable) {
                                     Box(
                                         Modifier
-                                            .size(22.dp)
+                                            .size(40.dp)
                                             .clickable {
                                                 val wasOn = state.nightOn
                                                 actions.onToggleNight()
@@ -220,7 +250,6 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                             Modifier.size(19.dp)
                                         )
                                     }
-                                    Spacer(Modifier.width(14.dp))
                                 }
                                 run {
                                     val flashColor = when {
@@ -231,7 +260,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                     }
                                     Box(
                                         Modifier
-                                            .size(22.dp)
+                                            .size(40.dp)
                                             .clickable {
                                                 if (state.mode == CamMode.VIDEO || state.mode == CamMode.SLO_MO) {
                                                     val wasOn = state.videoTorch
@@ -254,14 +283,13 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                     }
                                 }
                                 if (!videoFamilyPill) {
-                                    Spacer(Modifier.width(14.dp))
                                     if (state.facingFront) {
                                         // Live Photo has no real implementation on
                                         // this platform: shown like the reference,
                                         // honestly dimmed and unusable.
                                         Box(
                                             Modifier
-                                                .size(22.dp)
+                                                .size(40.dp)
                                                 .clickable {
                                                     state.toast = "Live Photo belum tersedia"
                                                 },
@@ -275,7 +303,7 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                     } else {
                                         Box(
                                             Modifier
-                                                .size(22.dp)
+                                                .size(40.dp)
                                                 .clickable {
                                                     actions.onOpenSheet(SheetKind.STYLES)
                                                 },
@@ -288,13 +316,14 @@ fun Controls26(state: CameraState, actions: CameraActions) {
                                         }
                                     }
                                 }
-                                Spacer(Modifier.width(14.dp))
-                                SixDotsGlyph(
-                                    Color.White,
+                                Box(
                                     Modifier
-                                        .size(20.dp)
-                                        .clickable { actions.onOpenSheet(SheetKind.GRID) }
-                                )
+                                        .size(40.dp)
+                                        .clickable { actions.onOpenSheet(SheetKind.GRID) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    SixDotsGlyph(Color.White, Modifier.size(20.dp))
+                                }
                             }
                         }
                     }
@@ -604,15 +633,34 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
 
     fun settleDrag() {
         val drag = state.carouselDragPx
-        if (abs(drag) >= 38f) {
-            val dir = if (drag < 0) 1 else -1
-            var i = selectedIdx + dir
-            while (i in modes.indices) {
-                if (state.modeAvailable(modes[i])) {
-                    actions.onModeSelect(modes[i])
-                    break
-                }
+        // Snap by WHERE THE STRIP RESTS, not a one-step threshold: the
+        // drag distance in label-pitch units decides the target index,
+        // symmetrically in both directions (the old single-step logic
+        // could refuse PHOTO when coming from VIDEO and spring back).
+        val pitchPx = if (centersPx.size > 1) {
+            (centersPx.last() - centersPx.first()) / (centersPx.size - 1)
+        } else {
+            1f
+        }
+        val steps = (-drag / pitchPx).roundToInt()
+        if (steps != 0) {
+            val dir = if (steps > 0) 1 else -1
+            var i = (selectedIdx + steps).coerceIn(modes.indices)
+            // Land on the nearest runnable mode in the drag direction.
+            while (i in modes.indices && !state.modeAvailable(modes[i])) {
                 i += dir
+            }
+            if (i in modes.indices && i != selectedIdx) {
+                actions.onModeSelect(modes[i])
+            } else if (i !in modes.indices) {
+                // Overshot past an unavailable end mode: walk back inward.
+                var j = (selectedIdx + steps).coerceIn(modes.indices)
+                while (j in modes.indices && !state.modeAvailable(modes[j])) {
+                    j -= dir
+                }
+                if (j in modes.indices && j != selectedIdx) {
+                    actions.onModeSelect(modes[j])
+                }
             }
         }
         scope.launch {
@@ -669,8 +717,20 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
                                 val m = modes[best]
                                 when {
                                     best == selectedIdx -> actions.onOpenSheet(SheetKind.GRID)
-                                    !state.modeAvailable(m) ->
-                                        state.toast = "Mode ${m.label} tidak didukung di perangkat ini"
+                                    !state.modeAvailable(m) -> {
+                                        // CINEMATIC explains itself ONCE per
+                                        // session; after that the dimmed
+                                        // label stays silent when tapped.
+                                        if (m == CamMode.CINEMATIC) {
+                                            if (!state.cinematicNoticeShown) {
+                                                state.cinematicNoticeShown = true
+                                                state.toast =
+                                                    "Mode CINEMATIC hanya tersedia di perangkat yang mendukungnya"
+                                            }
+                                        } else {
+                                            state.toast = "Mode ${m.label} tidak didukung di perangkat ini"
+                                        }
+                                    }
                                     else -> actions.onModeSelect(m)
                                 }
                             }
@@ -718,6 +778,9 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
             val bulgeX by animateFloatAsState(bulgeXTarget, bubbleSpec, label = "bubbleX")
             val bulgeY by animateFloatAsState(bulgeYTarget, bubbleSpec, label = "bubbleY")
             val bubbleProgress = ((bulgeX - 1f) / 0.15f).coerceIn(0f, 1f)
+            // Entry-tier GPUs skip the extra glass layers entirely (the
+            // swell itself stays); mid/flagship render the full glass.
+            val fullGlass = state.caps.perfTier != PerfTier.ENTRY
             val selWidthDp = with(density) { textWidthsPx[selectedIdx].toDp() } + 30.dp
             Box(
                 Modifier
@@ -734,43 +797,45 @@ private fun ModeCarouselPill(state: CameraState, actions: CameraActions) {
                 // Liquid Glass layers — alpha follows the swell, so at rest
                 // the capsule is pixel-identical to the plain one: frost
                 // gradient, specular highlight across the top, bright rim.
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .graphicsLayer { alpha = bubbleProgress }
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(
-                                    Color.White.copy(alpha = 0.38f),
-                                    Color.White.copy(alpha = 0.10f),
-                                    Color.White.copy(alpha = 0.22f)
+                if (fullGlass) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { alpha = bubbleProgress }
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.White.copy(alpha = 0.38f),
+                                        Color.White.copy(alpha = 0.10f),
+                                        Color.White.copy(alpha = 0.22f)
+                                    )
                                 )
                             )
-                        )
-                )
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight(0.55f)
-                        .graphicsLayer { alpha = bubbleProgress }
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(
-                                    Color.White.copy(alpha = 0.55f),
-                                    Color.White.copy(alpha = 0f)
+                    )
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight(0.55f)
+                            .graphicsLayer { alpha = bubbleProgress }
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.White.copy(alpha = 0.55f),
+                                        Color.White.copy(alpha = 0f)
+                                    )
                                 )
                             )
-                        )
-                )
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .border(
-                            1.dp,
-                            Color.White.copy(alpha = 0.48f * bubbleProgress),
-                            RoundedCornerShape(50)
-                        )
-                )
+                    )
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .border(
+                                1.dp,
+                                Color.White.copy(alpha = 0.48f * bubbleProgress),
+                                RoundedCornerShape(50)
+                            )
+                    )
+                }
             }
             // Sliding label strip (clipped by the pill itself). Unbounded width:
             // the strip is wider than the pill, and a width-capped Row would
@@ -892,7 +957,7 @@ private fun Sheet26(state: CameraState, actions: CameraActions, modifier: Modifi
                     SheetKind.STYLES, SheetKind.FILTER, SheetKind.EXPOSURE ->
                         IosAdjustBar(kind, state, actions)
                     SheetKind.FLASH, SheetKind.TIMER, SheetKind.ASPECT,
-                    SheetKind.APERTURE, SheetKind.ACTION -> {
+                    SheetKind.APERTURE, SheetKind.ACTION, SheetKind.CONFIG -> {
                         Column {
                             Text(
                                 "‹  Kontrol",
@@ -947,6 +1012,13 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
             }
             items += SheetItem("ASPECT", false,
                 { actions.onOpenSheet(SheetKind.ASPECT) }) { c -> AspectGlyph(c, aspectLabel, Modifier.size(28.dp)) }
+            // CONFIG: this app's own photo-quality configuration
+            // (presets + sharpness/saturation/contrast/gamma/denoise,
+            // applied for real at capture — see PhotoConfig.kt).
+            items += SheetItem("CONFIG", !state.photoConfig().isNeutral,
+                { actions.onOpenSheet(SheetKind.CONFIG) }) { c ->
+                ConfigGlyph(c, Modifier.size(28.dp))
+            }
             items += if (state.nightExtAvailable) {
                 SheetItem("NIGHT MODE", state.nightOn,
                     {
@@ -966,8 +1038,9 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
             items += exposureItem
             // ACTION opens its own panel: master toggle + the software
             // gyro-EIS toggle. Available when this device can stabilize for
-            // real: a gyroscope (software EIS) or hardware stabilization.
-            val actionSupported = state.caps.gyroAvailable ||
+            // real: a gyroscope, the fused motion sensor (virtual gyro on
+            // gyro-less phones), or hardware stabilization.
+            val actionSupported = state.caps.motionAvailable ||
                 state.caps.videoStabilization || state.caps.oisAvailable
             items += if (actionSupported) {
                 SheetItem("ACTION", state.actionOn,
@@ -1054,9 +1127,9 @@ private fun SheetGrid26(state: CameraState, actions: CameraActions) {
                 state.settingsOpen = true
             }
         ) {
-            GearGlyph(Color.White, Modifier.size(20.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Pengaturan & Info", color = Color.White, fontSize = 12.sp)
+            GearGlyph(Color.White, Modifier.size(15.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Pengaturan & Info", color = Color.White, fontSize = 11.sp)
         }
         Row(
             verticalAlignment = Alignment.CenterVertically,

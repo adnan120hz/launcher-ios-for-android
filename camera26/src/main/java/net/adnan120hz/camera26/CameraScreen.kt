@@ -214,7 +214,7 @@ private fun CameraScreenContent() {
     var eisSurfaceSize by remember { mutableStateOf(0 to 0) }
     var eisFacing by remember { mutableStateOf(state.facingFront) }
     val eisWanted = state.mode == CamMode.VIDEO && state.actionOn && state.eisEnabled &&
-        state.caps.gyroAvailable && !state.eisFailed
+        state.caps.motionAvailable && !state.eisFailed
     // A shutter tap that lands while the EIS pipeline is still spinning up
     // (or whose encoder start failed) is parked here and resolved on the
     // EIS / plain path as soon as either is ready — the tap is never dropped.
@@ -265,10 +265,13 @@ private fun CameraScreenContent() {
         val gradeMatrix = if (
             state.mode == CamMode.PHOTO || state.mode == CamMode.PORTRAIT
         ) state.activeGradeMatrix() else null
+        // CONFIG (the app's own quality settings) applies to PHOTO captures.
+        val photoConfig = if (state.mode == CamMode.PHOTO) state.photoConfig() else null
         controller.takePhoto(
             squareCrop = state.aspect == PhotoAspect.SQUARE,
             gradeMatrix = gradeMatrix,
             portraitStrength = portraitStrength,
+            photoConfig = photoConfig,
             onSaved = { refreshThumb() },
             onError = { msg -> state.toast = msg },
             onNotice = { msg -> state.toast = msg }
@@ -361,7 +364,9 @@ private fun CameraScreenContent() {
             return
         }
         pano.discardFrames()
-        val gyroOk = state.caps.gyroAvailable
+        // Motion source: real gyroscope, or the fused motion sensor as a
+        // virtual gyro — only truly sensor-less devices use timed mode.
+        val gyroOk = state.caps.motionAvailable
         pano.start(gyroOk)
         panoRt.reset(pano.yawDeg())
         state.panoSweeping = true
@@ -504,10 +509,19 @@ private fun CameraScreenContent() {
         state.zoomTarget = if (state.facingFront) {
             t.coerceIn(state.sessionMinZoom, state.sessionMaxZoom)
         } else {
-            t.coerceIn(
-                state.dialMin.coerceAtLeast(0.1f),
-                state.dialMax.coerceAtMost(40f)
-            )
+            val lo = state.dialMin.coerceAtLeast(0.1f)
+            // Absolute ceiling across ALL bindable sessions. The old clamp
+            // used the CURRENT session's digital range only: after a
+            // mid-gesture lens rebind that range could shrink, the dial
+            // target got clamped down ("mentok") and the animator visibly
+            // pulled the zoom back toward 1x. The ceiling now also never
+            // drops below the currently displayed ratio.
+            val sessionCeil = state.sessions().maxOfOrNull { s ->
+                s.ratio * state.sessionMaxZoom
+            } ?: state.dialMax
+            val hi = maxOf(state.dialMax, sessionCeil, state.zoomRatio)
+                .coerceAtMost(40f)
+            t.coerceIn(lo, maxOf(hi, lo + 0.5f))
         }
     }
 
@@ -534,10 +548,16 @@ private fun CameraScreenContent() {
 
     val zoomAnim = remember { Animatable(1f) }
     LaunchedEffect(state.zoomTarget) {
-        zoomAnim.animateTo(
-            state.zoomTarget,
-            spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessLow)
-        ) {
+        // Dial input gets its own chase: higher stiffness + near-critical
+        // damping tracks the finger tightly with no overshoot jerk —
+        // smoother than the button spring, but never laggy. Buttons and
+        // pinch keep the softer long-glide spring.
+        val spec = if (state.zoomDialDriven) {
+            spring<Float>(dampingRatio = 0.92f, stiffness = 420f)
+        } else {
+            spring<Float>(dampingRatio = 0.88f, stiffness = Spring.StiffnessLow)
+        }
+        zoomAnim.animateTo(state.zoomTarget, spec) {
             state.zoomRatio = value
             applyZoomAbsolute(value)
         }
@@ -675,6 +695,11 @@ private fun CameraScreenContent() {
 
     // ------------------------------------------------------------ init
     LaunchedEffect(Unit) {
+        // First run: the developer introduction shows once (Settings can
+        // re-open it later without resetting this flag).
+        if (!state.onboardingDone) {
+            state.onboardingVisible = true
+        }
         // CameraManager capability reads run off the main thread.
         state.caps = withContext(Dispatchers.Default) { computeCaps(context) }
         state.micGranted = ContextCompat.checkSelfPermission(
@@ -730,6 +755,23 @@ private fun CameraScreenContent() {
             refreshThumb()
         } catch (e: Throwable) {
             state.bindError = "Kamera tidak tersedia di perangkat ini"
+        }
+    }
+
+    // Update check: GitHub releases vs the installed version, async and
+    // 24h-cached; the result only ever surfaces inside Settings.
+    LaunchedEffect(Unit) {
+        val found = withContext(Dispatchers.IO) {
+            val vn = try {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            } catch (e: Throwable) {
+                null
+            } ?: "0.5.0"
+            UpdateChecker.check(context, vn)
+        }
+        if (found != null) {
+            state.updateTag = found.tag
+            state.updateUrl = found.url
         }
     }
 
@@ -806,7 +848,7 @@ private fun CameraScreenContent() {
             if (controller.recordingActive) controller.stopRecording()
             controller.unbindAll()
             state.sessionBound = false
-            val pipeline = EisPipeline(context)
+            val pipeline = EisPipeline(context, state.caps.perfTier)
             eisPipeline = pipeline
             eisFacing = state.facingFront
             pipeline.listener = object : EisPipeline.Listener {
@@ -1071,12 +1113,15 @@ private fun CameraScreenContent() {
     // Preview region: everything above the solid-black control strip
     // (strip content height + this device's navigation-bar inset). The
     // shutter and mode pill live on that strip, never over the preview.
+    // The strip height is state-dependent (the Portrait wheel grows it):
+    // using the bare constant here let the preview creep up and swallow
+    // the top black band in exactly those states.
     val screenDensity = LocalDensity.current
     val navBottomDp = with(screenDensity) {
         WindowInsets.navigationBars.getBottom(screenDensity).toDp().value
     }
     val previewRegionH = (
-        screenCfg.screenHeightDp.toFloat() - BOTTOM_STRIP_HEIGHT_DP - navBottomDp
+        screenCfg.screenHeightDp.toFloat() - bottomStripHeightDp(state) - navBottomDp
         ).coerceAtLeast(1f)
     val previewArea = previewAreaDp(
         aspect = state.aspect,
@@ -1197,13 +1242,23 @@ private fun CameraScreenContent() {
                         }
                     }
                 }
-                .pointerInput(Unit) {
+                .pointerInput(previewRegionH) {
                     var total = 0f
+                    var fromStrip = false
+                    val stripTopPx = with(screenDensity) { previewRegionH.dp.toPx() }
                     detectHorizontalDragGestures(
-                        onDragStart = { total = 0f },
+                        // Swipes that START on the bottom control strip
+                        // belong to the carousel pill / shutter zone; the
+                        // full-screen swipe must not also fire there (the
+                        // two settle paths fighting was one source of the
+                        // "won't stay on PHOTO" behaviour).
+                        onDragStart = { pos ->
+                            total = 0f
+                            fromStrip = pos.y >= stripTopPx
+                        },
                         onHorizontalDrag = { _, drag -> total += drag },
                         onDragEnd = {
-                            if (abs(total) > 70f && state.sheet == SheetKind.NONE) {
+                            if (!fromStrip && abs(total) > 70f && state.sheet == SheetKind.NONE) {
                                 swipeMode(if (total < 0) 1 else -1)
                             }
                         },
@@ -1317,6 +1372,17 @@ private fun CameraScreenContent() {
             CameraSettingsScreen(state, onBack = { state.settingsOpen = false })
         }
 
+        // First-run developer introduction (once; re-openable in Settings).
+        if (state.onboardingVisible) {
+            OnboardingScreen(
+                onStart = {
+                    state.onboardingDone = true
+                    state.persistAll()
+                    state.onboardingVisible = false
+                }
+            )
+        }
+
         // Countdown.
         state.countdown?.let { c ->
             if (c > 0) {
@@ -1378,9 +1444,17 @@ internal fun previewAreaDp(
     }
     var w = screenW
     var h = screenW * ratio
-    if (h > screenH) {
-        h = screenH
-        w = screenH / ratio
+    if (h > screenH - TOP_BAND_MIN_DP) {
+        // Guarantee the top black band in EVERY letterboxed state: when
+        // the width-driven height would eat it (e.g. PORTRAIT, whose
+        // aperture wheel grows the bottom strip — the reported "hitam di
+        // atas hilang" bug), fit by height minus the band instead and let
+        // the preview shrink, exactly like iOS.
+        h = (screenH - TOP_BAND_MIN_DP).coerceAtLeast(1f)
+        w = h / ratio
     }
     return w to h
 }
+
+/** Minimum top black band kept in letterboxed modes (the top pill floats in it). */
+internal const val TOP_BAND_MIN_DP = 76f

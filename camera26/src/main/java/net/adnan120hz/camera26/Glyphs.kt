@@ -399,3 +399,21 @@ fun CubeGlyph(color: Color, modifier: Modifier = Modifier) {
         drawLine(color, lowerRight, bottom, sw)
     }
 }
+
+/** CONFIG glyph: three adjustment sliders with offset knobs (iOS-style). */
+@Composable
+fun ConfigGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width; val h = size.height
+        val sw = w * 0.055f
+        val rows = listOf(0.26f to 0.66f, 0.5f to 0.34f, 0.74f to 0.58f)
+        for ((fy, knobFrac) in rows) {
+            val y = h * fy
+            drawLine(color, Offset(w * 0.14f, y), Offset(w * 0.86f, y), sw)
+            drawCircle(
+                color, w * 0.085f, Offset(w * (0.14f + 0.72f * knobFrac), y),
+                style = Stroke(sw)
+            )
+        }
+    }
+}

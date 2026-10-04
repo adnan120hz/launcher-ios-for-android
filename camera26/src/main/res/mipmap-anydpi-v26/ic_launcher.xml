@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- App icon from the user's own artwork: lens image cut into a fluid
-     iOS-style squircle (superellipse, ~23.5% equivalent corner radius,
-     transparent outside) as the foreground, 88% centred over a gray
-     gradient background matched to the artwork's edge falloff. -->
+<!-- App icon from the user's own artwork, used whole — never cropped.
+     Foreground = the ENTIRE user image scaled "contain" to ~74% of the
+     canvas (only the photo's white surround outside the tile is
+     transparent), centred over a gray gradient background sampled from
+     the artwork's own tile edges, so the full tile + lens stay visible
+     inside any launcher mask. Legacy mipmaps bake the same composition. -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@drawable/ic_launcher_background" />
     <foreground android:drawable="@mipmap/ic_launcher_foreground" />
